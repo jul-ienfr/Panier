@@ -207,7 +207,9 @@ def collect_offers_for_drives(
     offers: list[StoreOffer] = []
     for drive in drives:
         resolved_profile = managed_browser_profile_for_drive(profile, drive)
-        browser = ManagedBrowserClient(command=browser_command, profile=resolved_profile, site=drive)
+        browser = ManagedBrowserClient(
+            command=browser_command, profile=resolved_profile, site=drive
+        )
         try:
             collected = _collect_drive_offers_with_optional_catalog(
                 items, drive, browser, max_results=max_results, catalog=catalog

@@ -781,6 +781,7 @@ items:
 
 
 def test_plan_collects_multiple_drives_and_recommends(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "catalog.yaml").write_text("products: []\n", encoding="utf-8")
     (tmp_path / "recipes.yaml").write_text(
         """
 - name: Gratin
@@ -958,6 +959,7 @@ def test_drive_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch
 
 
 def test_plan_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "catalog.yaml").write_text("products: []\n", encoding="utf-8")
     (tmp_path / "recipes.yaml").write_text(
         """
 - name: Riz rapide
@@ -975,7 +977,13 @@ def test_plan_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch)
         seen["profile"] = browser.profile
         seen["site"] = browser.site
         return [
-            StoreOffer(store=drive, item="riz", product="Riz basmati 1kg", price=2.5, unit_price=2.5)
+            StoreOffer(
+                store=drive,
+                item="riz",
+                product="Riz basmati 1kg",
+                price=2.5,
+                unit_price=2.5,
+            )
         ]
 
     monkeypatch.setattr(cli, "collect_drive_offers", fake_collect)
