@@ -1,0 +1,10 @@
+items:
+  - name: riz
+    quantity: 1
+    unit: kg
+  - name: tomates concassées
+    quantity: 2
+    unit: boîte
+  - name: haricots rouges
+    quantity: 2
+    unit: boîte

@@ -1,0 +1,31 @@
+offers:
+  - store: leclerc
+    item: riz
+    product: Riz long grain 1kg
+    price: 1.80
+    unit_price: 1.80
+  - store: intermarche
+    item: riz
+    product: Riz long grain 1kg
+    price: 1.65
+    unit_price: 1.65
+  - store: leclerc
+    item: tomates concassées
+    product: Tomates concassées 400g x2
+    price: 1.70
+    unit_price: 2.13
+  - store: intermarche
+    item: tomates concassées
+    product: Tomates concassées 400g x2
+    price: 2.10
+    unit_price: 2.63
+  - store: leclerc
+    item: haricots rouges
+    product: Haricots rouges 400g x2
+    price: 2.20
+    unit_price: 2.75
+  - store: intermarche
+    item: haricots rouges
+    product: Haricots rouges 400g x2
+    price: 1.90
+    unit_price: 2.38
