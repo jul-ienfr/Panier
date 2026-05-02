@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import quote_plus
 
+from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient
 from panier.models import ShoppingItem, StoreOffer, normalize_name
 
 
@@ -45,6 +47,13 @@ class OfferScore:
     offer: StoreOffer
     score: float
     reason: str
+
+
+@dataclass(frozen=True)
+class BrowserSearchResult:
+    entry: DriveSearchQuery
+    url: str
+    browser_result: BrowserCommandResult
 
 
 _STOPWORDS = {
@@ -129,6 +138,35 @@ def build_drive_search_plan(
             )
         )
     return plan
+
+
+_DRIVE_SEARCH_URLS = {
+    "leclerc": "https://www.e.leclerc/recherche?text={query}",
+    "carrefour": "https://www.carrefour.fr/s?q={query}",
+    "intermarche": "https://www.intermarche.com/recherche/{query}",
+}
+
+
+def drive_search_url(drive_name: str, query: str) -> str:
+    template = _DRIVE_SEARCH_URLS.get(normalize_name(drive_name))
+    encoded = quote_plus(query)
+    if template is None:
+        return f"https://www.google.com/search?q={quote_plus(f'{drive_name} drive {query}')}"
+    return template.format(query=encoded)
+
+
+def open_drive_searches(
+    items: list[ShoppingItem],
+    drive_name: str,
+    browser: ManagedBrowserClient,
+    products: dict[str, DriveProduct] | None = None,
+) -> list[BrowserSearchResult]:
+    results: list[BrowserSearchResult] = []
+    for entry in build_drive_search_plan(items, drive_name, products):
+        url = drive_search_url(drive_name, entry.query)
+        browser_result = browser.navigate(url)
+        results.append(BrowserSearchResult(entry=entry, url=url, browser_result=browser_result))
+    return results
 
 
 def best_offer_for_item(item: ShoppingItem, offers: list[StoreOffer]) -> OfferScore | None:

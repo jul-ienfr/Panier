@@ -7,7 +7,8 @@ import typer
 import yaml
 
 from panier import __version__
-from panier.drive import best_offer_for_item, build_drive_search_plan
+from panier.drive import best_offer_for_item, build_drive_search_plan, open_drive_searches
+from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
     Pantry,
@@ -408,6 +409,39 @@ def drive_plan(
     typer.echo("\nRecherches à lancer:")
     for entry in build_drive_search_plan(items, drive):
         typer.echo(f"- {format_item(entry.item)} -> {entry.query} ({entry.confidence})")
+
+
+@drive_app.command("open")
+def drive_open(
+    shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
+    drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
+    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "panier",
+    site: Annotated[str | None, typer.Option("--site", help="Site Managed Browser")] = None,
+    browser_command: Annotated[
+        str | None,
+        typer.Option("--browser-command", help="Commande wrapper Managed Browser"),
+    ] = None,
+) -> None:
+    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
+    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=profile,
+        site=site or drive,
+    )
+    try:
+        results = open_drive_searches(items, drive, browser)
+    except ManagedBrowserError as exc:
+        typer.echo(f"Erreur Managed Browser: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("Recherches ouvertes dans Managed Browser:")
+    for result in results:
+        tab_id = result.browser_result.data.get("tabId") or result.browser_result.data.get(
+            "currentTabId"
+        )
+        suffix = f" [tab {tab_id}]" if tab_id else ""
+        typer.echo(f"- {format_item(result.entry.item)} -> {result.url}{suffix}")
 
 
 @drive_app.command("pick")

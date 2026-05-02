@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,7 +11,10 @@ from panier.drive import (
     best_offer_for_item,
     build_drive_search_plan,
     build_drive_search_query,
+    drive_search_url,
+    open_drive_searches,
 )
+from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
 from panier.models import FoodProfile, Pantry, PriceMode, Recipe, ShoppingItem, StoreOffer
 from panier.planner import consolidate_ingredients, recommend_basket, select_meals, subtract_pantry
 
@@ -398,6 +403,88 @@ def test_best_offer_for_item_prefers_relevance_then_unit_price() -> None:
     assert chosen.score > 0.5
 
 
+def test_drive_search_url_encodes_leclerc_query() -> None:
+    assert drive_search_url("leclerc", "tomates concassées") == (
+        "https://www.e.leclerc/recherche?text=tomates+concass%C3%A9es"
+    )
+
+
+def test_managed_browser_client_builds_wrapper_command() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps({"tabId": "abc"})
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser",
+        profile="courses",
+        site="leclerc",
+        runner=fake_runner,
+    )
+
+    result = client.navigate("https://example.test/search")
+
+    assert result.data == {"tabId": "abc"}
+    assert calls == [
+        [
+            "managed-browser",
+            "navigate",
+            "--url",
+            "https://example.test/search",
+            "--profile",
+            "courses",
+            "--site",
+            "leclerc",
+            "--json",
+        ]
+    ]
+
+
+def test_managed_browser_client_reports_failures() -> None:
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=7, stdout="", stderr="boom")
+
+    client = ManagedBrowserClient(command="managed-browser", runner=fake_runner)
+
+    try:
+        client.status()
+    except ManagedBrowserError as exc:
+        assert "boom" in str(exc)
+    else:
+        raise AssertionError("ManagedBrowserError attendu")
+
+
+def test_open_drive_searches_uses_managed_browser_client() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps({"tabId": len(calls)})
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="panier", site="leclerc", runner=fake_runner
+    )
+    results = open_drive_searches(
+        [ShoppingItem(name="riz"), ShoppingItem(name="tomates")], "leclerc", client
+    )
+
+    assert [result.browser_result.data["tabId"] for result in results] == [1, 2]
+    assert calls[0][:3] == ["managed-browser", "navigate", "--url"]
+    assert calls[0][3] == "https://www.e.leclerc/recherche?text=riz"
+    assert calls[1][3] == "https://www.e.leclerc/recherche?text=tomates"
+
+
 def test_drive_cli_plan_and_pick(tmp_path: Path) -> None:
     runner = CliRunner()
     shopping = tmp_path / "shopping.yaml"
@@ -442,3 +529,22 @@ offers:
     assert pick_result.exit_code == 0
     assert "Meilleurs produits:" in pick_result.output
     assert "Tomates concassées 400g" in pick_result.output
+
+
+def test_drive_cli_open_reports_managed_browser_error(tmp_path: Path) -> None:
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "drive",
+            "open",
+            str(shopping),
+            "--browser-command",
+            "python -c 'import sys; sys.exit(3)'",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Erreur Managed Browser:" in result.output

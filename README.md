@@ -34,6 +34,7 @@ panier pantry need examples/chili.yaml
 panier pantry consume examples/chili.yaml
 panier shopping from-recipe examples/chili.yaml
 panier drive plan examples/shopping-list.yaml --drive leclerc
+panier drive open examples/shopping-list.yaml --drive leclerc --profile panier
 panier drive pick examples/shopping-list.yaml examples/prices.yaml
 cp examples/recipes.yaml ~/.panier/recipes.yaml
 panier recipe suggest --meals 3
@@ -52,7 +53,20 @@ panier drive pick examples/shopping-list.yaml examples/prices.yaml
 ```
 
 `drive plan` prépare des termes de recherche stables, avec règles de marque distributeur.
-`drive pick` choisit le meilleur produit parmi des offres déjà collectées : correspondance du type demandé d’abord, puis prix.
+`drive open` ouvre ces recherches via le Managed Browser local au lieu de scraper directement le site :
+
+```bash
+panier drive open examples/shopping-list.yaml --drive leclerc --profile panier
+```
+
+Par défaut, Panier appelle le wrapper local :
+
+```bash
+node /home/jul/tools/camofox-browser/scripts/managed-browser.js ... --json
+```
+
+La commande peut être surchargée avec `PANIER_MANAGED_BROWSER_COMMAND` ou `--browser-command`.
+`drive pick` choisit ensuite le meilleur produit parmi des offres collectées : correspondance du type demandé d’abord, puis prix.
 
 ### Stock / pantry
 
