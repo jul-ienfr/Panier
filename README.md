@@ -27,6 +27,9 @@ pip install -e '.[dev]'
 panier profile init
 panier profile dislike add oignons
 panier profile allergy add arachides
+panier llm status
+PANIER_NO_LLM=1 panier llm status
+panier --no-llm explain item "Tomates concassées bio 400g"
 panier pantry init
 panier pantry add riz --quantity 150 --unit g --min 300g
 panier pantry list
@@ -160,6 +163,26 @@ panier shopping from-recipe examples/chili.yaml
 Les unités compatibles sont normalisées pour les bases courantes : `g/kg` et `ml/cl/l`.
 Les unités métier (`boîte`, `pièce`, etc.) restent comparées telles quelles.
 Les seuils `--min` déclenchent une alerte de réachat quand le stock passe dessous.
+
+## Déterminisme et garde-fou LLM
+
+Panier fonctionne aujourd'hui en déterministe local-first : les commandes de planification, scoring, comparaison et explication n'appellent pas de LLM. Le garde-fou `PANIER_NO_LLM` est disponible pour verrouiller ce comportement avant d'éventuelles intégrations futures :
+
+```bash
+panier llm status
+PANIER_NO_LLM=1 panier llm status
+panier --no-llm llm status
+```
+
+`panier llm status` affiche le mode courant, la source du garde-fou et le fait qu'aucun appel LLM n'est implémenté. La variable accepte les valeurs usuelles (`1`, `true`, `yes`, `on` pour activer ; `0`, `false`, `no`, `off` pour désactiver).
+
+Les surfaces d'explication sont également déterministes et sans réseau :
+
+```bash
+panier explain item "Tomates concassées bio 400g"
+```
+
+Cette commande montre l'entrée, le nom canonique, la requête de recherche locale et une confiance explicite basée sur de simples règles de normalisation. Le module reste minimal pour pouvoir être remplacé/complété par un catalogue produit local.
 
 ## Philosophie
 
