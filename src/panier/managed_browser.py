@@ -47,7 +47,7 @@ class ManagedBrowserClient:
         self,
         *,
         command: str | None = None,
-        profile: str = "panier",
+        profile: str = "courses",
         site: str = "leclerc",
         runner: CommandRunner = default_runner,
     ) -> None:

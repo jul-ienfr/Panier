@@ -409,6 +409,40 @@ def test_drive_search_url_encodes_leclerc_query() -> None:
     )
 
 
+def test_drive_open_defaults_to_courses_managed_profile(tmp_path: Path) -> None:
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding='utf-8')
+print(json.dumps({'tabId': 'default-profile-ok'}))
+""".strip(),
+        encoding="utf-8",
+    )
+    calls = tmp_path / "calls.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "drive",
+            "open",
+            str(shopping),
+            "--browser-command",
+            f"python {recorder} {calls}",
+        ],
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(calls.read_text(encoding="utf-8"))
+    assert "--profile" in argv
+    assert argv[argv.index("--profile") + 1] == "courses"
+    assert argv[argv.index("--site") + 1] == "leclerc"
+
+
 def test_managed_browser_client_builds_wrapper_command() -> None:
     calls: list[list[str]] = []
 
