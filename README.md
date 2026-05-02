@@ -161,6 +161,29 @@ Les unités compatibles sont normalisées pour les bases courantes : `g/kg` et `
 Les unités métier (`boîte`, `pièce`, etc.) restent comparées telles quelles.
 Les seuils `--min` déclenchent une alerte de réachat quand le stock passe dessous.
 
+## Architecture déterministe d'abord
+
+Panier privilégie un cœur déterministe : à entrées identiques (profil, recettes, stock, prix YAML/JSON et options CLI), la sélection de recettes, la liste consolidée, les requêtes drive et la recommandation panier doivent produire la même sortie à chaque exécution.
+
+Concrètement :
+
+- les recettes sont filtrées dans l'ordre stable des fichiers locaux, après normalisation des noms ;
+- les quantités sont consolidées puis triées par nom et unité normalisés ;
+- les requêtes drive sont générées par règles explicites (`build_drive_search_plan`) : nom canonique, marque commune, marque distributeur uniquement sur le drive compatible, sinon requête générique ;
+- la comparaison panier trie les magasins et choisit une solution stable en cas d'égalité (un seul drive avant un split équivalent, puis noms de drives triés) ;
+- sans `--collect`, Panier ne doit pas ouvrir de navigateur, appeler le réseau ou dépendre d'un LLM : les prix fournis localement sont la seule source d'offres.
+
+### Politique d'escalade LLM / réseau
+
+Le flux normal doit rester explicable et rejouable. Une escalade non déterministe n'est acceptable que si l'utilisateur la demande explicitement ou si une commande dédiée la documente clairement :
+
+1. utiliser les règles locales et les fichiers fournis ;
+2. afficher les correspondances faibles ou manquantes au lieu de les inventer ;
+3. collecter via Managed Browser uniquement avec `drive collect`, `drive open`, `plan --collect` ou `week --collect` ;
+4. réserver un éventuel LLM à une étape assistée, auditable et optionnelle (ex. proposition de synonymes ou substitution), jamais à la décision silencieuse du panier final.
+
+Cette approche facilite les tests snapshot/régression, évite les appels externes surprises et garde les recommandations justifiables.
+
 ## Philosophie
 
 Panier n'est pas juste un comparateur de drives. Le flux cible est :
