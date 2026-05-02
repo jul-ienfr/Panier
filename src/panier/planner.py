@@ -14,6 +14,7 @@ from panier.models import (
     StoreOffer,
     normalize_name,
 )
+from panier.nutrition import score_recipe_balance
 
 
 @dataclass(frozen=True)
@@ -45,8 +46,54 @@ def compatible_recipes(recipes: list[Recipe], profile: FoodProfile) -> list[Reci
     return [recipe for recipe in recipes if not recipe.conflicts(profile)]
 
 
-def select_meals(recipes: list[Recipe], profile: FoodProfile, meals: int) -> list[Recipe]:
+def filter_recipes(
+    recipes: list[Recipe],
+    *,
+    include_tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
+    max_prep_minutes: int | None = None,
+    cost_level: str | None = None,
+    min_balance_score: int | None = None,
+) -> list[Recipe]:
+    filtered: list[Recipe] = []
+    for recipe in recipes:
+        recipe_tags = {normalize_name(tag) for tag in recipe.tags}
+        if include_tags and not include_tags.issubset(recipe_tags):
+            continue
+        if exclude_tags and recipe_tags.intersection(exclude_tags):
+            continue
+        if max_prep_minutes is not None and recipe.prep_minutes is not None:
+            if recipe.prep_minutes > max_prep_minutes:
+                continue
+        if cost_level is not None and recipe.cost_level != normalize_name(cost_level):
+            continue
+        if min_balance_score is not None:
+            if score_recipe_balance(recipe).score < min_balance_score:
+                continue
+        filtered.append(recipe)
+    return filtered
+
+
+def select_meals(
+    recipes: list[Recipe],
+    profile: FoodProfile,
+    meals: int,
+    *,
+    include_tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
+    max_prep_minutes: int | None = None,
+    cost_level: str | None = None,
+    min_balance_score: int | None = None,
+) -> list[Recipe]:
     compatible = compatible_recipes(recipes, profile)
+    compatible = filter_recipes(
+        compatible,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )
     return compatible[:meals]
 
 

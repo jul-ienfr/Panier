@@ -97,23 +97,47 @@ _SYNONYMS: dict[str, tuple[str, ...]] = {
     "haricots rouges": ("haricots chili", "red kidney beans"),
 }
 
+_LECLERC_VIUZ_BASE_URL = "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz"
+
 _DRIVE_SEARCH_URLS = {
     "auchan": "https://www.auchan.fr/recherche?text={query}",
-    "leclerc": "https://www.e.leclerc/recherche?text={query}",
+    "leclerc": f"{_LECLERC_VIUZ_BASE_URL}/recherche.aspx?TexteRecherche={{query}}&tri=1",
     "carrefour": "https://www.carrefour.fr/s?q={query}",
     "intermarche": "https://www.intermarche.com/recherche/{query}",
 }
 
 _DRIVE_BASE_URLS = {
     "auchan": "https://www.auchan.fr",
-    "leclerc": "https://www.e.leclerc",
+    "leclerc": _LECLERC_VIUZ_BASE_URL,
     "carrefour": "https://www.carrefour.fr",
     "intermarche": "https://www.intermarche.com",
 }
 
 _PRODUCT_EXTRACTION_JS = r"""
 (() => {
+  const normalizedText = (node) => (node.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const leclercProductText = (node) => {
+    const title = node.querySelector?.('.aWCRS310_Product')?.textContent?.trim() || '';
+    const text = normalizedText(node);
+    const match = text.match(/(\d+)\s*€\s*,\s*(\d{1,2})/);
+    if (!match) return null;
+    const price = `${match[1]},${match[2]} €`;
+    const afterPrice = text.slice((match.index || 0) + match[0].length);
+    const unitPattern = /\d+(?:[,.]\d{1,2})?\s*€\s*\/\s*(kg|g|l|cl|ml|pièce|unité)/i;
+    const unitMatch = afterPrice.match(unitPattern);
+    const fallbackTitle = text.split(/Ajouter au panier|Bientôt disponible/)[0].trim();
+    return {
+      title: title || fallbackTitle,
+      price,
+      unitPrice: unitMatch?.[0]?.trim() || '',
+    };
+  };
   const priceText = (node) => {
+    const leclerc = leclercProductText(node);
+    if (leclerc?.price) return leclerc.price;
     const candidates = [
       '[data-testid*=price]', '[class*=price]', '[class*=Price]',
       '[aria-label*=prix i]', '[itemprop=price]'
@@ -128,11 +152,15 @@ _PRODUCT_EXTRACTION_JS = r"""
     return match ? match[0].trim() : '';
   };
   const unitText = (node) => {
+    const leclerc = leclercProductText(node);
+    if (leclerc?.unitPrice) return leclerc.unitPrice;
     const text = node.textContent || '';
     const match = text.match(/\d+[\d\s.,]*\s*€\s*\/\s*(kg|g|l|cl|ml|pièce|unité)/i);
     return match ? match[0].trim() : '';
   };
   const titleText = (node) => {
+    const leclerc = leclercProductText(node);
+    if (leclerc?.title) return leclerc.title;
     const candidates = [
       '[data-testid*=title]', '[class*=title]', '[class*=Title]', 'h2', 'h3', 'a'
     ];
@@ -144,7 +172,7 @@ _PRODUCT_EXTRACTION_JS = r"""
     return '';
   };
   const nodes = Array.from(document.querySelectorAll(
-    '[data-testid*=product], [class*=product], [class*=Product], article, li'
+    '.liWCRS310_Product, [data-testid*=product], [class*=product], [class*=Product], article, li'
   ));
   const items = [];
   for (const node of nodes) {
@@ -225,11 +253,12 @@ def collect_drive_offers(
 ) -> list[StoreOffer]:
     """Ouvre les recherches drive puis extrait les premières offres visibles."""
     offers: list[StoreOffer] = []
-    for search in open_drive_searches(items, drive_name, browser, products):
-        tab_id = search.browser_result.data.get("tabId") or search.browser_result.data.get(
-            "currentTabId"
-        )
-        payload = browser.console_eval(_PRODUCT_EXTRACTION_JS, tab_id=tab_id).data
+    for entry in build_drive_search_plan(items, drive_name, products):
+        url = drive_search_url(drive_name, entry.query)
+        browser_result = browser.navigate(url)
+        search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
+        tab_id = _browser_tab_id(browser_result.data)
+        payload = _browser_value(browser.console_eval(_PRODUCT_EXTRACTION_JS, tab_id=tab_id).data)
         raw_items = payload.get("items", []) if isinstance(payload, dict) else []
         item_offers: list[StoreOffer] = []
         for raw in raw_items:
@@ -238,6 +267,9 @@ def collect_drive_offers(
             offer = _offer_from_browser_item(search.entry.item, drive_name, raw)
             if offer is not None:
                 item_offers.append(offer)
+        if normalize_name(drive_name) == "leclerc":
+            offers.extend(item_offers[:max_results])
+            continue
         scored = sorted(
             (score_offer(search.entry.item, offer) for offer in item_offers),
             key=lambda offer_score: (
@@ -249,6 +281,19 @@ def collect_drive_offers(
         )
         offers.extend(score.offer for score in scored[:max_results])
     return offers
+
+
+def _browser_value(payload: dict) -> object:
+    if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+        return payload["result"].get("value", payload["result"])
+    return payload
+
+
+def _browser_tab_id(payload: dict) -> str | None:
+    value = _browser_value(payload)
+    if not isinstance(value, dict):
+        return None
+    return value.get("tabId") or value.get("tab_id") or value.get("currentTabId")
 
 
 def best_offer_for_item(

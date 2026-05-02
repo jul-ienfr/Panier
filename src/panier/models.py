@@ -28,8 +28,18 @@ class FoodProfile(BaseModel):
     forbidden: set[str] = Field(default_factory=set)
     dislikes: set[str] = Field(default_factory=set)
     likes: set[str] = Field(default_factory=set)
+    accepted_recipes: set[str] = Field(default_factory=set)
+    rejected_recipes: set[str] = Field(default_factory=set)
 
-    @field_validator("allergies", "forbidden", "dislikes", "likes", mode="before")
+    @field_validator(
+        "allergies",
+        "forbidden",
+        "dislikes",
+        "likes",
+        "accepted_recipes",
+        "rejected_recipes",
+        mode="before",
+    )
     @classmethod
     def normalize_set(cls, value: object) -> set[str]:
         if value is None:
@@ -72,6 +82,22 @@ class Recipe(BaseModel):
     servings: int = 1
     ingredients: list[Ingredient]
     tags: list[str] = Field(default_factory=list)
+    prep_minutes: int | None = None
+    cost_level: str | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_tags(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [normalize_name(value)]
+        return [normalize_name(str(item)) for item in value if str(item).strip()]
+
+    @field_validator("cost_level")
+    @classmethod
+    def normalize_cost_level(cls, value: str | None) -> str | None:
+        return normalize_name(value) if value else None
 
     def conflicts(self, profile: FoodProfile) -> list[tuple[str, PreferenceReason]]:
         conflicts: list[tuple[str, PreferenceReason]] = []

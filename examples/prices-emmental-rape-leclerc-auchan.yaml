@@ -1,0 +1,239 @@
+offers:
+- store: auchan
+  item: emmental râpé
+  product: (341) AUCHAN Emmental râpé français 500g8,36€ / kg
+  price: 4.18
+  unit_price: 8.36
+  confidence: exact
+  url: https://www.auchan.fr/auchan-emmental-rape-francais/pr-C1200015
+- store: auchan
+  item: emmental râpé
+  product: (341) AUCHAN Emmental râpé français 350g8,43€ / kg
+  price: 2.95
+  unit_price: 8.43
+  confidence: exact
+  url: https://www.auchan.fr/auchan-emmental-rape-francais/pr-C1199997
+- store: auchan
+  item: emmental râpé
+  product: (341) AUCHAN Emmental râpé français 200g8,50€ / kg
+  price: 1.7
+  unit_price: 8.5
+  confidence: exact
+  url: https://www.auchan.fr/auchan-emmental-rape-francais/pr-C1199999
+- store: auchan
+  item: emmental râpé
+  product: (341) AUCHAN Emmental râpé français 3x70g9,48€ / kg
+  price: 1.99
+  unit_price: 9.48
+  confidence: exact
+  url: https://www.auchan.fr/auchan-emmental-rape-francais/pr-C1199998
+- store: auchan
+  item: emmental râpé
+  product: (15) PRESIDENT Emmental râpé fondant 200g10,80€ / kg
+  price: 2.16
+  unit_price: 10.8
+  confidence: exact
+  url: https://www.auchan.fr/president-emmental-rape-fondant/pr-C1180705
+- store: auchan
+  item: emmental râpé
+  product: (10) PRESIDENT Emmental râpé fondant 350g10,91€ / kg
+  price: 3.82
+  unit_price: 10.91
+  confidence: exact
+  url: https://www.auchan.fr/president-emmental-rape-fondant/pr-C1198274
+- store: auchan
+  item: emmental râpé
+  product: (18) ENTREMONT Emmental français râpé extra fin 500g11,16€ / kg
+  price: 5.58
+  unit_price: 11.16
+  confidence: medium
+  url: https://www.auchan.fr/entremont-emmental-francais-rape-extra-fin/pr-C1197118
+- store: auchan
+  item: emmental râpé
+  product: (17) AUCHAN BIO Emmental râpé français 200g11,60€ / kg
+  price: 2.32
+  unit_price: 11.6
+  confidence: exact
+  url: https://www.auchan.fr/auchan-bio-emmental-rape-francais/pr-C1194680
+- store: auchan
+  item: emmental râpé
+  product: (9) AUCHAN Emmental râpé français 100g11,80€ / kg
+  price: 1.18
+  unit_price: 11.8
+  confidence: exact
+  url: https://www.auchan.fr/auchan-emmental-rape-francais/pr-C1196872
+- store: auchan
+  item: emmental râpé
+  product: (10) ENTREMONT Emmental râpé Français fin et fondant 160g12,31€ / kg
+  price: 1.97
+  unit_price: 12.31
+  confidence: exact
+  url: https://www.auchan.fr/entremont-emmental-rape-francais-fin-et-fondant/pr-C1193503
+- store: auchan
+  item: emmental râpé
+  product: (13) PRESIDENT Emmental râpé 3x70g13,33€ / kg
+  price: 2.8
+  unit_price: 13.33
+  confidence: exact
+  url: https://www.auchan.fr/president-emmental-rape/pr-C1200024
+- store: leclerc
+  item: emmental râpé
+  product: Emmental rapé Eco+ 29%mg - 1kg
+  price: 6.99
+  unit_price: 6.99
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental rapé Eco + 30% MG - 500g
+  price: 3.52
+  unit_price: 7.04
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Fromage Emmental Eco+ Râpé - 200g
+  price: 1.42
+  unit_price: 7.1
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 1kg
+  price: 7.89
+  unit_price: 7.89
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 750g
+  price: 5.95
+  unit_price: 7.93
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 500g
+  price: 3.99
+  unit_price: 7.98
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 325g
+  price: 2.65
+  unit_price: 8.15
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 200g
+  price: 1.65
+  unit_price: 8.25
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental Fromage râpé Les Croisés - 3x70g
+  price: 1.89
+  unit_price: 9.0
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental râpé fondant Président 500g
+  price: 4.8
+  unit_price: 9.6
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental râpé fondant Président 200g
+  price: 2.01
+  unit_price: 10.05
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental râpé fondant Président 350g
+  price: 3.54
+  unit_price: 10.11
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental Rapé Français Entremont - 500g
+  price: 5.3
+  unit_price: 10.6
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Fromage Emmental Entremont Râpé - 300g
+  price: 3.25
+  unit_price: 10.83
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage rapé Les Croisés - 100g
+  price: 1.09
+  unit_price: 10.9
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage râpé bio Bio village - 400g
+  price: 4.45
+  unit_price: 11.13
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental râpé Entremont 3x70g
+  price: 2.36
+  unit_price: 11.24
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage râpé bio Bio village - 200g
+  price: 2.33
+  unit_price: 11.65
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental râpé fondant Président 3x70g
+  price: 2.55
+  unit_price: 12.14
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental -30% sel fromage râpé Les Croisés - 150g
+  price: 1.99
+  unit_price: 13.27
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Emmental fromage râpé bio Bio village - 100g
+  price: 1.49
+  unit_price: 14.9
+  confidence: medium
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Fromage Emmental râpé NRT IGP Est-Central - 200g
+  price: 3.49
+  unit_price: 17.45
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#
+- store: leclerc
+  item: emmental râpé
+  product: Fromage Emmental râpé NRT IGP de Savoie - 100g
+  price: 1.99
+  unit_price: 19.9
+  confidence: exact
+  url: https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=emmental+r%C3%A2p%C3%A9&tri=1#

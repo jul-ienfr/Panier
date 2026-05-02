@@ -16,6 +16,7 @@ from panier.drive import (
 from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
+    Ingredient,
     Pantry,
     PriceMode,
     Recipe,
@@ -25,10 +26,12 @@ from panier.models import (
     load_yaml_model,
     normalize_name,
 )
+from panier.nutrition import BalanceScore, score_recipe_balance
 from panier.planner import (
     CompareBy,
     consolidate_ingredients,
     consume_pantry,
+    filter_recipes,
     low_stock_items,
     recommend_basket,
     select_meals,
@@ -76,9 +79,27 @@ def load_recipes(data_dir: Path) -> list[Recipe]:
     path = recipes_path(data_dir)
     if not path.exists():
         raise typer.BadParameter(f"Fichier recettes absent : {path}")
-    return [
-        Recipe.model_validate(item) for item in yaml.safe_load(path.read_text(encoding="utf-8"))
-    ]
+    return read_recipes_file(path)
+
+
+def read_recipes_file(path: Path) -> list[Recipe]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    if isinstance(data, dict):
+        data = [data]
+    return [Recipe.model_validate(item) for item in data]
+
+
+def save_recipes(data_dir: Path, recipes: list[Recipe]) -> None:
+    path = recipes_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            [recipe.model_dump(mode="json") for recipe in recipes],
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 def load_pantry(data_dir: Path) -> Pantry:
@@ -126,6 +147,98 @@ def load_recipe_file(path: Path) -> Recipe:
 
 def recipe_items(recipe: Recipe) -> list[ShoppingItem]:
     return consolidate_ingredients([recipe])
+
+
+def find_recipe(recipes: list[Recipe], name: str) -> Recipe:
+    normalized = normalize_name(name)
+    for recipe in recipes:
+        if normalize_name(recipe.name) == normalized:
+            return recipe
+    raise typer.BadParameter(f"Recette introuvable : {name}")
+
+
+def selected_recipes(data_dir: Path, names: list[str]) -> list[Recipe]:
+    recipes = load_recipes(data_dir)
+    if not names:
+        raise typer.BadParameter("Indique au moins une recette.")
+    return [find_recipe(recipes, name) for name in names]
+
+
+def parse_csv_set(value: str | None) -> set[str] | None:
+    if value is None:
+        return None
+    parsed = {normalize_name(part) for part in value.split(",") if part.strip()}
+    return parsed or None
+
+
+def recipes_to_shopping_payload(items: list[ShoppingItem]) -> dict[str, list[dict[str, object]]]:
+    return {"items": [item.model_dump(mode="json", exclude_none=True) for item in items]}
+
+
+def collect_offers_for_drives(
+    items: list[ShoppingItem],
+    drives: list[str],
+    *,
+    profile: str,
+    browser_command: str | None,
+    max_results: int,
+) -> list[StoreOffer]:
+    offers: list[StoreOffer] = []
+    for drive in drives:
+        browser = ManagedBrowserClient(command=browser_command, profile=profile, site=drive)
+        try:
+            collected = collect_drive_offers(items, drive, browser, max_results=max_results)
+        except ManagedBrowserError as exc:
+            typer.echo(f"Erreur Managed Browser {drive}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"Collecte {drive}: {len(collected)} offres")
+        offers.extend(collected)
+    return offers
+
+
+def parse_recipe_ingredient(value: str) -> Ingredient:
+    parts = [part.strip() for part in value.split(":")]
+    if not parts or not parts[0]:
+        raise typer.BadParameter("Ingrédient invalide. Format: nom[:quantité[:unité]]")
+    name = parts[0]
+    quantity = None
+    unit = None
+    if len(parts) >= 2 and parts[1]:
+        quantity = float(parts[1].replace(",", "."))
+    if len(parts) >= 3 and parts[2]:
+        unit = parts[2]
+    if len(parts) > 3:
+        raise typer.BadParameter("Ingrédient invalide. Format: nom[:quantité[:unité]]")
+    return Ingredient(name=name, quantity=quantity, unit=unit)
+
+
+def shopping_items_for_recipes(
+    recipes: list[Recipe], pantry: Pantry | None = None
+) -> list[ShoppingItem]:
+    items = consolidate_ingredients(recipes)
+    if pantry is not None:
+        return subtract_pantry(items, pantry)
+    return items
+
+
+def echo_recipe_selection(recipes: list[Recipe], *, show_balance: bool = False) -> None:
+    typer.echo("Recettes:")
+    for recipe in recipes:
+        suffix = ""
+        if show_balance:
+            score = score_recipe_balance(recipe)
+            suffix = f" — équilibre {score.score}/100 ({score.verdict})"
+        typer.echo(f"- {recipe.name}{suffix}")
+
+
+def format_balance_score(score: BalanceScore) -> str:
+    positives = ", ".join(score.positives) if score.positives else "aucun signal positif"
+    penalties = ", ".join(score.penalties) if score.penalties else "aucune pénalité"
+    return (
+        f"Équilibre: {score.score}/100 ({score.verdict})\n"
+        f"+ {positives}\n"
+        f"- {penalties}"
+    )
 
 
 def echo_items(title: str, items: list[ShoppingItem]) -> None:
@@ -243,6 +356,47 @@ def add_preference(kind: str, value: str, data_dir: Path) -> None:
     typer.echo(f"Ajouté à {kind}: {normalized}")
 
 
+def preference_label(kind: str) -> str:
+    return {
+        "accepted_recipes": "recettes acceptées",
+        "rejected_recipes": "recettes rejetées",
+    }.get(kind, kind)
+
+
+def add_profile_value(kind: str, value: str, data_dir: Path) -> None:
+    profile = load_profile(data_dir)
+    normalized = normalize_name(value)
+    getattr(profile, kind).add(normalized)
+    if kind == "accepted_recipes":
+        profile.rejected_recipes.discard(normalized)
+    elif kind == "rejected_recipes":
+        profile.accepted_recipes.discard(normalized)
+    dump_yaml(profile_path(data_dir), profile)
+    typer.echo(f"Ajouté à {preference_label(kind)}: {normalized}")
+
+
+def remove_profile_value(kind: str, value: str, data_dir: Path) -> None:
+    profile = load_profile(data_dir)
+    normalized = normalize_name(value)
+    values = getattr(profile, kind)
+    values.discard(normalized)
+    dump_yaml(profile_path(data_dir), profile)
+    typer.echo(f"Retiré de {preference_label(kind)}: {normalized}")
+
+
+def apply_recipe_feedback_order(recipes: list[Recipe], profile: FoodProfile) -> list[Recipe]:
+    accepted = profile.accepted_recipes
+    rejected = profile.rejected_recipes
+    kept = [recipe for recipe in recipes if normalize_name(recipe.name) not in rejected]
+    return sorted(
+        kept,
+        key=lambda recipe: (
+            normalize_name(recipe.name) not in accepted,
+            normalize_name(recipe.name),
+        ),
+    )
+
+
 @profile_app.command("allergy")
 def profile_allergy(
     action: Annotated[str, typer.Argument(help="add")],
@@ -285,6 +439,38 @@ def profile_like(
     if action != "add":
         raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
     add_preference("likes", value, data_dir)
+
+
+
+
+@profile_app.command("accept-recipe")
+def profile_accept_recipe(
+    action: Annotated[str, typer.Argument(help="add|remove")],
+    value: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    if action == "add":
+        add_profile_value("accepted_recipes", value, data_dir)
+        return
+    if action == "remove":
+        remove_profile_value("accepted_recipes", value, data_dir)
+        return
+    raise typer.BadParameter("Action attendue : add ou remove.")
+
+
+@profile_app.command("reject-recipe")
+def profile_reject_recipe(
+    action: Annotated[str, typer.Argument(help="add|remove")],
+    value: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    if action == "add":
+        add_profile_value("rejected_recipes", value, data_dir)
+        return
+    if action == "remove":
+        remove_profile_value("rejected_recipes", value, data_dir)
+        return
+    raise typer.BadParameter("Action attendue : add ou remove.")
 
 
 @pantry_app.command("init")
@@ -550,44 +736,158 @@ def drive_collect(
         typer.echo(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
 
-@recipe_app.command("suggest")
-def recipe_suggest(
-    meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
+@recipe_app.command("list")
+def recipe_list(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    tag: Annotated[str | None, typer.Option("--tag", help="Filtrer par tag")] = None,
+    include_tags: Annotated[str | None, typer.Option("--include-tags")] = None,
+    exclude_tags: Annotated[str | None, typer.Option("--exclude-tags")] = None,
+    max_prep_minutes: Annotated[int | None, typer.Option("--max-prep-minutes", min=1)] = None,
+    cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
+    min_balance_score: Annotated[
+        int | None, typer.Option("--min-balance-score", min=0, max=100)
+    ] = None,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
+    = False,
+) -> None:
+    if balanced and min_balance_score is None:
+        min_balance_score = 70
+    include = parse_csv_set(include_tags)
+    if tag:
+        include = (include or set()) | {normalize_name(tag)}
+    recipes = filter_recipes(
+        load_recipes(data_dir),
+        include_tags=include,
+        exclude_tags=parse_csv_set(exclude_tags),
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )
+    if not recipes:
+        typer.echo("Aucune recette")
+        return
+    for recipe in recipes:
+        tags = f" [{', '.join(recipe.tags)}]" if recipe.tags else ""
+        prep = f" ({recipe.prep_minutes} min)" if recipe.prep_minutes is not None else ""
+        cost = f" {{{recipe.cost_level}}}" if recipe.cost_level else ""
+        balance = ""
+        if balanced or min_balance_score is not None:
+            score = score_recipe_balance(recipe)
+            balance = f" — équilibre {score.score}/100 ({score.verdict})"
+        typer.echo(f"- {recipe.name}{tags}{prep}{cost}{balance}")
+
+
+@recipe_app.command("score")
+def recipe_score(
+    name: Annotated[str, typer.Argument()],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    selected = select_meals(load_recipes(data_dir), load_profile(data_dir), meals)
-    for recipe in selected:
-        typer.echo(f"- {recipe.name}")
+    recipe = find_recipe(load_recipes(data_dir), name)
+    typer.echo(recipe.name)
+    typer.echo(format_balance_score(score_recipe_balance(recipe)))
 
 
-@app.command("plan")
-def plan(
-    meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
+@recipe_app.command("add")
+def recipe_add(
+    source: Annotated[str, typer.Argument(help="Fichier YAML à importer ou nom de recette")],
+    ingredients: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--ingredient",
+            "-i",
+            help="Ingrédient au format nom[:quantité[:unité]], ex: 'emmental râpé:100:g'",
+        ),
+    ] = None,
+    tags: Annotated[list[str] | None, typer.Option("--tag", "-t")] = None,
+    servings: Annotated[int, typer.Option("--servings", min=1)] = 1,
+    prep_minutes: Annotated[int | None, typer.Option("--prep-minutes", min=1)] = None,
+    cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    source_path = Path(source)
+    if source_path.exists():
+        new_recipes = read_recipes_file(source_path)
+    else:
+        parsed_ingredients = [parse_recipe_ingredient(value) for value in ingredients or []]
+        if not parsed_ingredients:
+            raise typer.BadParameter("Passe un fichier YAML ou ajoute au moins un --ingredient.")
+        new_recipes = [
+            Recipe(
+                name=source,
+                servings=servings,
+                tags=list(tags or []),
+                prep_minutes=prep_minutes,
+                cost_level=cost_level,
+                ingredients=parsed_ingredients,
+            )
+        ]
+
+    recipes = load_recipes(data_dir) if recipes_path(data_dir).exists() else []
+    existing = {normalize_name(recipe.name) for recipe in recipes}
+    for recipe in new_recipes:
+        if normalize_name(recipe.name) in existing:
+            raise typer.BadParameter(f"Recette déjà présente : {recipe.name}")
+        recipes.append(recipe)
+        existing.add(normalize_name(recipe.name))
+    save_recipes(data_dir, recipes)
+    for recipe in new_recipes:
+        typer.echo(f"Recette ajoutée : {recipe.name}")
+
+
+@recipe_app.command("show")
+def recipe_show(
+    name: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    recipe = find_recipe(load_recipes(data_dir), name)
+    typer.echo(recipe.name)
+    typer.echo(f"Portions: {recipe.servings}")
+    if recipe.tags:
+        typer.echo(f"Tags: {', '.join(recipe.tags)}")
+    if recipe.prep_minutes is not None:
+        typer.echo(f"Préparation: {recipe.prep_minutes} min")
+    if recipe.cost_level:
+        typer.echo(f"Coût: {recipe.cost_level}")
+    echo_items(
+        "Ingrédients:",
+        [
+            ShoppingItem(name=ingredient.name, quantity=ingredient.quantity, unit=ingredient.unit)
+            for ingredient in recipe.ingredients
+        ],
+    )
+
+
+@recipe_app.command("remove")
+def recipe_remove(
+    name: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    recipes = load_recipes(data_dir)
+    normalized_name = normalize_name(name)
+    kept = [recipe for recipe in recipes if normalize_name(recipe.name) != normalized_name]
+    if len(kept) == len(recipes):
+        typer.echo(f"Recette introuvable : {name}")
+        return
+    save_recipes(data_dir, kept)
+    typer.echo(f"Recette supprimée : {name}")
+
+
+@recipe_app.command("shopping")
+def recipe_shopping(
+    names: Annotated[list[str], typer.Argument(help="Noms des recettes à consolider")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
-    selected = select_meals(load_recipes(data_dir), load_profile(data_dir), meals)
-    items = consolidate_ingredients(selected)
+    recipes = selected_recipes(data_dir, names)
     pantry = load_pantry_if_exists(data_dir)
-    if pantry is not None:
-        items = subtract_pantry(items, pantry)
-
-    typer.echo("Recettes:")
-    for recipe in selected:
-        typer.echo(f"- {recipe.name}")
-    typer.echo("\nListe à acheter:")
-    if not items:
-        typer.echo("- rien à acheter")
+    items = shopping_items_for_recipes(recipes, pantry)
+    echo_recipe_selection(recipes)
+    echo_items("\nListe à acheter:", items)
+    if prices is None or not items:
         return
-    for item in items:
-        typer.echo(f"- {format_item(item)}")
-
-    if prices is None:
-        return
-
     comparison = normalize_compare_by(compare_by)
     recommendation = recommend_basket(
         items,
@@ -596,6 +896,252 @@ def plan(
         max_stores=max_stores,
         compare_by=comparison,
     )
+    echo_recommendation(
+        items=items,
+        recommendation_items=recommendation.by_item,
+        mode=recommendation.mode,
+        stores=recommendation.stores,
+        total=recommendation.total,
+        savings_vs_best_single=recommendation.savings_vs_best_single,
+        reason=recommendation.reason,
+        compare_by=comparison,
+    )
+
+
+@recipe_app.command("suggest")
+def recipe_suggest(
+    meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    include_tags: Annotated[str | None, typer.Option("--include-tags")] = None,
+    exclude_tags: Annotated[str | None, typer.Option("--exclude-tags")] = None,
+    max_prep_minutes: Annotated[int | None, typer.Option("--max-prep-minutes", min=1)] = None,
+    cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
+    min_balance_score: Annotated[
+        int | None, typer.Option("--min-balance-score", min=0, max=100)
+    ] = None,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
+    = False,
+) -> None:
+    if balanced and min_balance_score is None:
+        min_balance_score = 70
+    profile_data = load_profile(data_dir)
+    selected = select_meals(
+        apply_recipe_feedback_order(load_recipes(data_dir), profile_data),
+        profile_data,
+        meals,
+        include_tags=parse_csv_set(include_tags),
+        exclude_tags=parse_csv_set(exclude_tags),
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )
+    for recipe in selected:
+        suffix = ""
+        if balanced or min_balance_score is not None:
+            score = score_recipe_balance(recipe)
+            suffix = f" — équilibre {score.score}/100 ({score.verdict})"
+        typer.echo(f"- {recipe.name}{suffix}")
+
+
+@app.command("plan")
+def plan(
+    meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    collect: Annotated[
+        str | None,
+        typer.Option("--collect", help="Drives à collecter, ex: leclerc,auchan"),
+    ] = None,
+    collect_output: Annotated[
+        Path | None,
+        typer.Option("--collect-output", help="Sauvegarder les offres collectées"),
+    ] = None,
+    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
+    browser_command: Annotated[
+        str | None,
+        typer.Option("--browser-command", help="Commande wrapper Managed Browser"),
+    ] = None,
+    max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
+    mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
+    max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+    use_pantry: Annotated[bool, typer.Option("--use-pantry/--no-pantry")] = True,
+    include_tags: Annotated[str | None, typer.Option("--include-tags")] = None,
+    exclude_tags: Annotated[str | None, typer.Option("--exclude-tags")] = None,
+    max_prep_minutes: Annotated[int | None, typer.Option("--max-prep-minutes", min=1)] = None,
+    cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
+    min_balance_score: Annotated[
+        int | None, typer.Option("--min-balance-score", min=0, max=100)
+    ] = None,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
+    = False,
+) -> None:
+    if balanced and min_balance_score is None:
+        min_balance_score = 70
+    profile_data = load_profile(data_dir)
+    selected = select_meals(
+        apply_recipe_feedback_order(load_recipes(data_dir), profile_data),
+        profile_data,
+        meals,
+        include_tags=parse_csv_set(include_tags),
+        exclude_tags=parse_csv_set(exclude_tags),
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )
+    items = consolidate_ingredients(selected)
+    if use_pantry:
+        pantry = load_pantry_if_exists(data_dir)
+        if pantry is not None:
+            items = subtract_pantry(items, pantry)
+
+    typer.echo("Recettes retenues:")
+    for recipe in selected:
+        suffix = ""
+        if balanced or min_balance_score is not None:
+            score = score_recipe_balance(recipe)
+            suffix = f" — équilibre {score.score}/100 ({score.verdict})"
+        typer.echo(f"- {recipe.name}{suffix}")
+    typer.echo("\nÀ acheter:")
+    if not items:
+        typer.echo("- rien à acheter")
+        return
+    for item in items:
+        typer.echo(f"- {format_item(item)}")
+
+    offers: list[StoreOffer] | None = None
+    if collect:
+        drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
+        offers = collect_offers_for_drives(
+            items,
+            drives,
+            profile=profile,
+            browser_command=browser_command,
+            max_results=max_results,
+        )
+        if collect_output is not None:
+            collect_output.parent.mkdir(parents=True, exist_ok=True)
+            collect_output.write_text(
+                yaml.safe_dump(
+                    {"offers": [offer.model_dump(mode="json") for offer in offers]},
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")
+    elif prices is not None:
+        offers = load_offers(prices)
+
+    if offers is None:
+        return
+
+    comparison = normalize_compare_by(compare_by)
+    recommendation = recommend_basket(
+        items,
+        offers,
+        mode=mode,
+        max_stores=max_stores,
+        compare_by=comparison,
+    )
+    echo_recommendation(
+        items=items,
+        recommendation_items=recommendation.by_item,
+        mode=recommendation.mode,
+        stores=recommendation.stores,
+        total=recommendation.total,
+        savings_vs_best_single=recommendation.savings_vs_best_single,
+        reason=recommendation.reason,
+        compare_by=comparison,
+    )
+
+
+@app.command("week")
+def week(
+    meals: Annotated[int, typer.Option("--meals", min=1)] = 7,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    collect: Annotated[
+        str | None,
+        typer.Option("--collect", help="Drives à collecter, ex: leclerc,auchan"),
+    ] = None,
+    collect_output: Annotated[Path | None, typer.Option("--collect-output")] = None,
+    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
+    mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
+    max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "unit-price",
+    use_pantry: Annotated[bool, typer.Option("--use-pantry/--no-pantry")] = True,
+    include_tags: Annotated[str | None, typer.Option("--include-tags")] = None,
+    exclude_tags: Annotated[str | None, typer.Option("--exclude-tags")] = None,
+    max_prep_minutes: Annotated[int | None, typer.Option("--max-prep-minutes", min=1)] = 45,
+    cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
+    balanced: Annotated[bool, typer.Option("--balanced/--no-balanced")] = True,
+    min_balance_score: Annotated[
+        int | None, typer.Option("--min-balance-score", min=0, max=100)
+    ] = None,
+) -> None:
+    if balanced and min_balance_score is None:
+        min_balance_score = 70
+    profile_data = load_profile(data_dir)
+    selected = select_meals(
+        apply_recipe_feedback_order(load_recipes(data_dir), profile_data),
+        profile_data,
+        meals,
+        include_tags=parse_csv_set(include_tags),
+        exclude_tags=parse_csv_set(exclude_tags),
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )
+    items = consolidate_ingredients(selected)
+    if use_pantry:
+        pantry = load_pantry_if_exists(data_dir)
+        if pantry is not None:
+            items = subtract_pantry(items, pantry)
+
+    typer.echo("Semaine:")
+    for index, recipe in enumerate(selected, start=1):
+        score = score_recipe_balance(recipe)
+        typer.echo(f"{index}. {recipe.name} — équilibre {score.score}/100 ({score.verdict})")
+    typer.echo("\nÀ acheter:")
+    if not items:
+        typer.echo("- rien à acheter")
+        return
+    for item in items:
+        typer.echo(f"- {format_item(item)}")
+
+    offers: list[StoreOffer] | None = None
+    if collect:
+        drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
+        offers = collect_offers_for_drives(
+            items, drives, profile=profile, browser_command=browser_command, max_results=max_results
+        )
+        if collect_output is not None:
+            collect_output.parent.mkdir(parents=True, exist_ok=True)
+            collect_output.write_text(
+                yaml.safe_dump(
+                    {"offers": [offer.model_dump(mode="json") for offer in offers]},
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")
+    elif prices is not None:
+        offers = load_offers(prices)
+
+    if offers is None:
+        return
+    comparison = normalize_compare_by(compare_by)
+    try:
+        recommendation = recommend_basket(
+            items, offers, mode=mode, max_stores=max_stores, compare_by=comparison
+        )
+    except ValueError as exc:
+        typer.echo(f"Recommandation indisponible: {exc}", err=True)
+        raise typer.Exit(1) from exc
     echo_recommendation(
         items=items,
         recommendation_items=recommendation.by_item,

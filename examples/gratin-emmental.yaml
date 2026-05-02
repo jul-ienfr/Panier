@@ -1,0 +1,15 @@
+name: gratin pâtes emmental
+servings: 2
+prep_minutes: 20
+cost_level: budget
+tags: [rapide, four, budget]
+ingredients:
+  - name: pâtes
+    quantity: 250
+    unit: g
+  - name: emmental râpé
+    quantity: 150
+    unit: g
+  - name: crème
+    quantity: 20
+    unit: cl

@@ -1,0 +1,20 @@
+- name: Gratin emmental
+  servings: 2
+  tags: [emmental, exemple]
+  ingredients:
+    - name: emmental râpé
+      quantity: 100
+      unit: g
+    - name: pâtes
+      quantity: 200
+      unit: g
+- name: Croque emmental
+  servings: 2
+  tags: [emmental, exemple]
+  ingredients:
+    - name: emmental râpé
+      quantity: 300
+      unit: g
+    - name: pain de mie
+      quantity: 4
+      unit: tranche

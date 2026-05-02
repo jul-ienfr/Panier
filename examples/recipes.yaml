@@ -1,6 +1,8 @@
 - name: Chili sin carne
   servings: 2
-  tags: [budget, vegetarien]
+  prep_minutes: 35
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
   ingredients:
     - name: riz
       quantity: 300
@@ -11,9 +13,17 @@
     - name: tomates concassées
       quantity: 1
       unit: boîte
+    - name: poivrons
+      quantity: 2
+      unit: pièce
+    - name: oignons
+      quantity: 1
+      unit: pièce
 - name: Pâtes thon tomate
   servings: 2
-  tags: [rapide]
+  prep_minutes: 15
+  cost_level: budget
+  tags: [rapide, budget, equilibre]
   ingredients:
     - name: pâtes
       quantity: 250
@@ -24,9 +34,287 @@
     - name: tomates concassées
       quantity: 1
       unit: boîte
+    - name: courgettes
+      quantity: 1
+      unit: pièce
+- name: Bowl quinoa thon légumes
+  servings: 2
+  prep_minutes: 20
+  cost_level: moyen
+  tags: [rapide, equilibre, légumes]
+  ingredients:
+    - name: quinoa
+      quantity: 180
+      unit: g
+    - name: thon
+      quantity: 1
+      unit: boîte
+    - name: tomates
+      quantity: 2
+      unit: pièce
+    - name: carottes
+      quantity: 2
+      unit: pièce
+- name: Riz poulet brocoli
+  servings: 2
+  prep_minutes: 25
+  cost_level: moyen
+  tags: [equilibre, légumes, batch]
+  ingredients:
+    - name: riz
+      quantity: 250
+      unit: g
+    - name: poulet
+      quantity: 250
+      unit: g
+    - name: brocoli
+      quantity: 1
+      unit: pièce
+    - name: oignons
+      quantity: 1
+      unit: pièce
+- name: Curry lentilles épinards riz
+  servings: 3
+  prep_minutes: 30
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
+  ingredients:
+    - name: riz
+      quantity: 240
+      unit: g
+    - name: lentilles
+      quantity: 250
+      unit: g
+    - name: épinards
+      quantity: 400
+      unit: g
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+    - name: oignons
+      quantity: 1
+      unit: pièce
+- name: Semoule pois chiches légumes
+  servings: 2
+  prep_minutes: 15
+  cost_level: budget
+  tags: [rapide, budget, vegetarien, equilibre]
+  ingredients:
+    - name: semoule
+      quantity: 180
+      unit: g
+    - name: pois chiches
+      quantity: 1
+      unit: boîte
+    - name: tomates
+      quantity: 2
+      unit: pièce
+    - name: carottes
+      quantity: 2
+      unit: pièce
+    - name: courgettes
+      quantity: 1
+      unit: pièce
+- name: Poêlée boulgour tofu poivrons
+  servings: 2
+  prep_minutes: 20
+  cost_level: moyen
+  tags: [rapide, vegetarien, equilibre]
+  ingredients:
+    - name: boulgour
+      quantity: 180
+      unit: g
+    - name: tofu
+      quantity: 200
+      unit: g
+    - name: poivrons
+      quantity: 2
+      unit: pièce
+    - name: oignons
+      quantity: 1
+      unit: pièce
+- name: Salade riz oeufs haricots verts
+  servings: 2
+  prep_minutes: 20
+  cost_level: budget
+  tags: [rapide, budget, equilibre, froid]
+  ingredients:
+    - name: riz
+      quantity: 180
+      unit: g
+    - name: œufs
+      quantity: 4
+      unit: pièce
+    - name: haricots verts
+      quantity: 400
+      unit: g
+    - name: tomates
+      quantity: 2
+      unit: pièce
+- name: Pommes de terre thon salade
+  servings: 2
+  prep_minutes: 25
+  cost_level: budget
+  tags: [budget, equilibre, froid]
+  ingredients:
+    - name: pommes de terre
+      quantity: 500
+      unit: g
+    - name: thon
+      quantity: 1
+      unit: boîte
+    - name: salade
+      quantity: 1
+      unit: pièce
+    - name: tomates
+      quantity: 2
+      unit: pièce
+- name: One pot pâtes poulet courgettes
+  servings: 3
+  prep_minutes: 25
+  cost_level: moyen
+  tags: [rapide, equilibre, une-casserole]
+  ingredients:
+    - name: pâtes
+      quantity: 300
+      unit: g
+    - name: poulet
+      quantity: 300
+      unit: g
+    - name: courgettes
+      quantity: 2
+      unit: pièce
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+- name: Riz dinde carottes petits pois
+  servings: 2
+  prep_minutes: 25
+  cost_level: moyen
+  tags: [rapide, equilibre, enfants]
+  ingredients:
+    - name: riz
+      quantity: 220
+      unit: g
+    - name: dinde
+      quantity: 250
+      unit: g
+    - name: carottes
+      quantity: 3
+      unit: pièce
+    - name: petits pois
+      quantity: 300
+      unit: g
+- name: Dahl lentilles corail tomates
+  servings: 3
+  prep_minutes: 25
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
+  ingredients:
+    - name: riz
+      quantity: 240
+      unit: g
+    - name: lentilles
+      quantity: 250
+      unit: g
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+    - name: épinards
+      quantity: 300
+      unit: g
+- name: Quinoa pois chiches brocoli
+  servings: 2
+  prep_minutes: 22
+  cost_level: moyen
+  tags: [vegetarien, equilibre, batch]
+  ingredients:
+    - name: quinoa
+      quantity: 180
+      unit: g
+    - name: pois chiches
+      quantity: 1
+      unit: boîte
+    - name: brocoli
+      quantity: 1
+      unit: pièce
+    - name: carottes
+      quantity: 2
+      unit: pièce
+- name: Pâtes lentilles tomates épinards
+  servings: 2
+  prep_minutes: 20
+  cost_level: budget
+  tags: [rapide, budget, vegetarien, equilibre]
+  ingredients:
+    - name: pâtes
+      quantity: 220
+      unit: g
+    - name: lentilles
+      quantity: 180
+      unit: g
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+    - name: épinards
+      quantity: 300
+      unit: g
+- name: Omelette pommes de terre épinards
+  servings: 2
+  prep_minutes: 18
+  cost_level: budget
+  tags: [rapide, budget, vegetarien, equilibre]
+  ingredients:
+    - name: œufs
+      quantity: 4
+      unit: pièce
+    - name: pommes de terre
+      quantity: 350
+      unit: g
+    - name: épinards
+      quantity: 250
+      unit: g
+    - name: oignons
+      quantity: 1
+      unit: pièce
+- name: Soupe lentilles carottes pain
+  servings: 3
+  prep_minutes: 35
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch, soupe]
+  ingredients:
+    - name: lentilles
+      quantity: 250
+      unit: g
+    - name: carottes
+      quantity: 4
+      unit: pièce
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+    - name: pain
+      quantity: 1
+      unit: pièce
+- name: Gratin pâtes emmental
+  servings: 2
+  prep_minutes: 20
+  cost_level: budget
+  tags: [rapide, four, budget]
+  ingredients:
+    - name: pâtes
+      quantity: 250
+      unit: g
+    - name: emmental râpé
+      quantity: 150
+      unit: g
+    - name: crème
+      quantity: 20
+      unit: cl
 - name: Omelette oignons
   servings: 1
-  tags: [rapide]
+  prep_minutes: 10
+  cost_level: budget
+  tags: [rapide, budget, vegetarien]
   ingredients:
     - name: œufs
       quantity: 3
