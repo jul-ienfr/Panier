@@ -74,6 +74,46 @@ def filter_recipes(
     return filtered
 
 
+def recipe_selection_score(
+    recipe: Recipe,
+    *,
+    profile: FoodProfile | None = None,
+    include_tags: set[str] | None = None,
+    cost_level: str | None = None,
+    min_balance_score: int | None = None,
+) -> int:
+    """Return a deterministic planner score for a recipe.
+
+    The score only uses local recipe/profile data and the requested constraints.
+    Hard constraints are still enforced by ``filter_recipes``; this score ranks
+    the remaining compatible recipes before deterministic tie-breaks are applied.
+    """
+    recipe_tags = {normalize_name(tag) for tag in recipe.tags}
+    normalized_cost_level = normalize_name(cost_level) if cost_level else None
+
+    score = 0
+    if profile is not None and normalize_name(recipe.name) in profile.accepted_recipes:
+        score += 1000
+
+    if include_tags:
+        score += 10 * len(recipe_tags.intersection(include_tags))
+
+    if min_balance_score is not None:
+        score += score_recipe_balance(recipe).score
+
+    if normalized_cost_level is not None:
+        if recipe.cost_level == normalized_cost_level:
+            score += 20
+    elif recipe.cost_level == "budget" or "budget" in recipe_tags:
+        score += 10
+
+    return score
+
+
+def _recipe_prep_sort_value(recipe: Recipe) -> int:
+    return recipe.prep_minutes if recipe.prep_minutes is not None else 10**9
+
+
 def select_meals(
     recipes: list[Recipe],
     profile: FoodProfile,
@@ -94,7 +134,31 @@ def select_meals(
         cost_level=cost_level,
         min_balance_score=min_balance_score,
     )
-    return compatible[:meals]
+    scored = [
+        (
+            recipe,
+            recipe_selection_score(
+                recipe,
+                profile=profile,
+                include_tags=include_tags,
+                cost_level=cost_level,
+                min_balance_score=min_balance_score,
+            ),
+        )
+        for recipe in compatible
+    ]
+    ranked = [
+        recipe
+        for recipe, _ in sorted(
+            scored,
+            key=lambda item: (
+                -item[1],
+                _recipe_prep_sort_value(item[0]),
+                normalize_name(item[0].name),
+            ),
+        )
+    ]
+    return ranked[:meals]
 
 
 def consolidate_ingredients(recipes: list[Recipe]) -> list[ShoppingItem]:

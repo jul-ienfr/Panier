@@ -33,6 +33,69 @@ def test_select_meals_excludes_disliked_ingredients() -> None:
     assert [recipe.name for recipe in select_meals(recipes, profile, meals=3)] == ["ok"]
 
 
+def test_select_meals_scores_recipes_deterministically_before_slicing() -> None:
+    recipes = [
+        Recipe(
+            name="Pâtes fromage",
+            prep_minutes=5,
+            cost_level="budget",
+            tags=["rapide", "budget"],
+            ingredients=[
+                {"name": "pâtes", "quantity": 250, "unit": "g"},
+                {"name": "fromage", "quantity": 150, "unit": "g"},
+            ],
+        ),
+        Recipe(
+            name="Bowl poulet",
+            prep_minutes=30,
+            cost_level="budget",
+            tags=["rapide", "budget"],
+            ingredients=[
+                {"name": "riz", "quantity": 150, "unit": "g"},
+                {"name": "poulet", "quantity": 150, "unit": "g"},
+                {"name": "brocoli", "quantity": 1, "unit": "pièce"},
+            ],
+        ),
+    ]
+
+    selected = select_meals(
+        recipes,
+        FoodProfile(),
+        meals=1,
+        include_tags={"rapide"},
+        min_balance_score=0,
+    )
+
+    assert [recipe.name for recipe in selected] == ["Bowl poulet"]
+
+
+def test_select_meals_tie_breaks_by_prep_minutes_then_name() -> None:
+    recipes = [
+        Recipe(name="Zeta", prep_minutes=20, tags=["rapide"], ingredients=[{"name": "riz"}]),
+        Recipe(name="Alpha", prep_minutes=20, tags=["rapide"], ingredients=[{"name": "riz"}]),
+        Recipe(name="Charlie", prep_minutes=10, tags=["rapide"], ingredients=[{"name": "riz"}]),
+    ]
+
+    selected = select_meals(recipes, FoodProfile(), meals=3, include_tags={"rapide"})
+
+    assert [recipe.name for recipe in selected] == ["Charlie", "Alpha", "Zeta"]
+
+
+def test_select_meals_tie_breaks_are_stable_across_input_order() -> None:
+    recipes = [
+        Recipe(name="Gamma", prep_minutes=15, tags=["rapide"], ingredients=[{"name": "riz"}]),
+        Recipe(name="Beta", prep_minutes=15, tags=["rapide"], ingredients=[{"name": "riz"}]),
+    ]
+
+    forward = select_meals(recipes, FoodProfile(), meals=2, include_tags={"rapide"})
+    backward = select_meals(
+        list(reversed(recipes)), FoodProfile(), meals=2, include_tags={"rapide"}
+    )
+
+    assert [recipe.name for recipe in forward] == ["Beta", "Gamma"]
+    assert [recipe.name for recipe in backward] == ["Beta", "Gamma"]
+
+
 def test_consolidate_ingredients_sums_same_unit() -> None:
     recipes = [
         Recipe(name="a", ingredients=[{"name": "Riz", "quantity": 100, "unit": "g"}]),
