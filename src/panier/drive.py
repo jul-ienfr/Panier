@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import quote_plus, urljoin
 
+from panier.catalog import DEFAULT_SYNONYMS, ProductCatalog, ResolutionStatus, resolve_item
 from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient
 from panier.models import ShoppingItem, StoreOffer, normalize_name
 
@@ -80,22 +81,7 @@ _STOPWORDS = {
     "nature",
 }
 
-_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "lardons": ("allumettes", "poitrine fumée", "bacon"),
-    "allumettes": ("lardons", "bacon"),
-    "steak haché": ("viande hachée", "boeuf haché", "bœuf haché"),
-    "crème": ("crème fraîche", "crème liquide", "crème épaisse"),
-    "parmesan": ("parmigiano reggiano", "grana padano", "fromage râpé italien"),
-    "filet de poulet": ("blanc de poulet", "escalope de poulet"),
-    "pâtes": ("spaghetti", "tagliatelle", "penne"),
-    "oignon": ("oignon jaune", "oignon blanc", "oignon rouge", "échalote"),
-    "lait": ("lait demi-écrémé", "lait entier", "lait écrémé"),
-    "beurre": ("beurre doux", "beurre demi-sel", "beurre salé"),
-    "fromage": ("emmental", "gruyère", "comté", "cheddar", "fromage râpé"),
-    "poulet": ("blanc de poulet", "filet de poulet", "escalope de poulet"),
-    "tomates concassées": ("tomates pelées", "pulpe de tomate", "concassé de tomates"),
-    "haricots rouges": ("haricots chili", "red kidney beans"),
-}
+_SYNONYMS: dict[str, tuple[str, ...]] = DEFAULT_SYNONYMS.copy()
 
 _LECLERC_VIUZ_BASE_URL = "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz"
 
@@ -206,20 +192,51 @@ def build_drive_search_query(
 
 
 def build_drive_search_plan(
-    items: list[ShoppingItem], drive_name: str, products: dict[str, DriveProduct] | None = None
+    items: list[ShoppingItem],
+    drive_name: str,
+    products: dict[str, DriveProduct] | None = None,
+    catalog: ProductCatalog | None = None,
 ) -> list[DriveSearchQuery]:
     products = products or {}
     plan: list[DriveSearchQuery] = []
     for item in items:
         product = products.get(normalize_name(item.name))
+        if product is not None:
+            plan.append(
+                DriveSearchQuery(
+                    item=item,
+                    query=build_drive_search_query(item, drive_name, product),
+                    confidence="high",
+                )
+            )
+            continue
+        if catalog is not None:
+            resolved = resolve_item(item, catalog, drive_name=drive_name)
+            if resolved.status != ResolutionStatus.UNRESOLVED:
+                plan.append(
+                    DriveSearchQuery(
+                        item=item,
+                        query=resolved.query,
+                        confidence=_resolution_confidence(resolved.status),
+                    )
+                )
+                continue
         plan.append(
             DriveSearchQuery(
                 item=item,
-                query=build_drive_search_query(item, drive_name, product),
-                confidence="high" if product else "low",
+                query=build_drive_search_query(item, drive_name, None),
+                confidence="low",
             )
         )
     return plan
+
+
+def _resolution_confidence(status: ResolutionStatus) -> str:
+    return {
+        ResolutionStatus.EXACT_CATALOG: "exact",
+        ResolutionStatus.EXACT_ALIAS: "high",
+        ResolutionStatus.FUZZY_LOCAL: "medium",
+    }.get(status, "low")
 
 
 def drive_search_url(drive_name: str, query: str) -> str:
@@ -235,9 +252,10 @@ def open_drive_searches(
     drive_name: str,
     browser: ManagedBrowserClient,
     products: dict[str, DriveProduct] | None = None,
+    catalog: ProductCatalog | None = None,
 ) -> list[BrowserSearchResult]:
     results: list[BrowserSearchResult] = []
-    for entry in build_drive_search_plan(items, drive_name, products):
+    for entry in build_drive_search_plan(items, drive_name, products, catalog):
         url = drive_search_url(drive_name, entry.query)
         browser_result = browser.navigate(url)
         results.append(BrowserSearchResult(entry=entry, url=url, browser_result=browser_result))
@@ -250,10 +268,11 @@ def collect_drive_offers(
     browser: ManagedBrowserClient,
     products: dict[str, DriveProduct] | None = None,
     max_results: int = 5,
+    catalog: ProductCatalog | None = None,
 ) -> list[StoreOffer]:
     """Ouvre les recherches drive puis extrait les premières offres visibles."""
     offers: list[StoreOffer] = []
-    for entry in build_drive_search_plan(items, drive_name, products):
+    for entry in build_drive_search_plan(items, drive_name, products, catalog):
         url = drive_search_url(drive_name, entry.query)
         browser_result = browser.navigate(url)
         search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
@@ -313,7 +332,9 @@ def best_offer_for_item(
     )
 
 
-def score_offer(item: ShoppingItem, offer: StoreOffer) -> OfferScore:
+def score_offer(
+    item: ShoppingItem, offer: StoreOffer, synonyms: dict[str, tuple[str, ...]] | None = None
+) -> OfferScore:
     item_tokens = set(_tokens(item.name))
     product_tokens = set(_tokens(offer.product))
     overlap = (
@@ -322,7 +343,7 @@ def score_offer(item: ShoppingItem, offer: StoreOffer) -> OfferScore:
         else 0.0
     )
     containment = 1.0 if normalize_name(item.name) in normalize_name(offer.product) else 0.0
-    synonym = 1.0 if _has_synonym_match(item.name, offer.product) else 0.0
+    synonym = 1.0 if _has_synonym_match(item.name, offer.product, synonyms) else 0.0
     confidence_bonus = {"exact": 0.15, "high": 0.10, "medium": 0.05}.get(offer.confidence, 0.0)
     score = min(1.0, 0.65 * overlap + 0.2 * containment + 0.15 * synonym + confidence_bonus)
     parts = [f"tokens {overlap:.2f}"]
@@ -407,11 +428,13 @@ def _tokens(text: str) -> list[str]:
     return [token for token in cleaned.split() if token not in _STOPWORDS and len(token) > 1]
 
 
-def _has_synonym_match(item_name: str, product_name: str) -> bool:
+def _has_synonym_match(
+    item_name: str, product_name: str, synonyms: dict[str, tuple[str, ...]] | None = None
+) -> bool:
     item = normalize_name(item_name)
     product = normalize_name(product_name)
-    for key, synonyms in _SYNONYMS.items():
-        candidates = (key, *synonyms)
+    for key, values in (synonyms or _SYNONYMS).items():
+        candidates = (key, *values)
         if any(candidate in item for candidate in candidates):
             return any(candidate in product for candidate in candidates)
     return False
