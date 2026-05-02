@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
 import yaml
 
 from panier import __version__
+from panier.deterministic import NO_LLM_ENV_VAR, explain_item, no_llm_status
 from panier.drive import (
     best_offer_for_item,
     build_drive_search_plan,
@@ -47,11 +49,15 @@ recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
 pantry_app = typer.Typer(help="Gérer le stock local.")
 shopping_app = typer.Typer(help="Générer des listes de courses.")
 drive_app = typer.Typer(help="Préparer les recherches et paniers drive.")
+llm_app = typer.Typer(help="État et garde-fous LLM.")
+explain_app = typer.Typer(help="Expliquer les choix déterministes locaux.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
 app.add_typer(shopping_app, name="shopping")
 app.add_typer(drive_app, name="drive")
+app.add_typer(llm_app, name="llm")
+app.add_typer(explain_app, name="explain")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -329,10 +335,49 @@ def normalize_compare_by(value: str) -> CompareBy:
 @app.callback()
 def main(
     version: Annotated[bool, typer.Option("--version", help="Afficher la version.")] = False,
+    no_llm: Annotated[
+        bool,
+        typer.Option(
+            "--no-llm",
+            help=f"Forcer le mode déterministe sans LLM (équivalent {NO_LLM_ENV_VAR}=1).",
+            envvar=NO_LLM_ENV_VAR,
+        ),
+    ] = False,
 ) -> None:
+    if no_llm:
+        click.get_current_context().obj = {"no_llm": True}
     if version:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+def current_cli_no_llm() -> bool:
+    obj = click.get_current_context().find_root().obj
+    return bool(isinstance(obj, dict) and obj.get("no_llm"))
+
+
+@llm_app.command("status")
+def llm_status() -> None:
+    status = no_llm_status(cli_no_llm=current_cli_no_llm())
+    typer.echo(f"Mode: {status.mode}")
+    typer.echo(f"LLM autorisé: {'non' if status.no_llm else 'oui'}")
+    typer.echo(f"Garde-fou: {NO_LLM_ENV_VAR}")
+    typer.echo(f"Source: {status.source}")
+    if status.raw_value is not None:
+        typer.echo(f"Valeur: {status.raw_value}")
+    typer.echo("Appels LLM implémentés: non")
+
+
+@explain_app.command("item")
+def explain_item_command(
+    name: Annotated[str, typer.Argument(help="Nom d'ingrédient ou produit à expliquer")],
+) -> None:
+    explanation = explain_item(name)
+    typer.echo(f"Entrée: {explanation.input_name}")
+    typer.echo(f"Nom canonique: {explanation.canonical_name}")
+    typer.echo(f"Requête: {explanation.query}")
+    typer.echo(f"Confiance: {explanation.confidence}")
+    typer.echo(f"Raison: {explanation.reason}")
 
 
 @profile_app.command("init")
