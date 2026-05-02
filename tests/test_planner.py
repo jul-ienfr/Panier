@@ -409,6 +409,49 @@ def test_drive_search_url_encodes_leclerc_query() -> None:
     )
 
 
+def test_drive_search_url_encodes_intermarche_and_auchan_queries() -> None:
+    assert drive_search_url("intermarche", "tomates concassées") == (
+        "https://www.intermarche.com/recherche/tomates+concass%C3%A9es"
+    )
+    assert drive_search_url("auchan", "coca cola") == (
+        "https://www.auchan.fr/recherche?text=coca+cola"
+    )
+
+
+def test_drive_open_defaults_to_courses_managed_profile(tmp_path: Path) -> None:
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding='utf-8')
+print(json.dumps({'tabId': 'default-profile-ok'}))
+""".strip(),
+        encoding="utf-8",
+    )
+    calls = tmp_path / "calls.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "drive",
+            "open",
+            str(shopping),
+            "--browser-command",
+            f"python {recorder} {calls}",
+        ],
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(calls.read_text(encoding="utf-8"))
+    assert "--profile" in argv
+    assert argv[argv.index("--profile") + 1] == "courses"
+    assert argv[argv.index("--site") + 1] == "leclerc"
+
+
 def test_managed_browser_client_builds_wrapper_command() -> None:
     calls: list[list[str]] = []
 
@@ -459,6 +502,49 @@ def test_managed_browser_client_reports_failures() -> None:
         assert "boom" in str(exc)
     else:
         raise AssertionError("ManagedBrowserError attendu")
+
+
+def test_managed_browser_client_falls_back_to_camofox_http() -> None:
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=1,
+            stdout="",
+            stderr="navigate failed (HTTP 500): Internal server error",
+        )
+
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http(method: str, path: str, payload: dict | None = None) -> dict:
+        calls.append((method, path, payload))
+        return {"tabId": "fallback-tab", "url": payload["url"] if payload else None}
+
+    client = ManagedBrowserClient(
+        command="managed-browser",
+        profile="panier",
+        site="leclerc",
+        runner=fake_runner,
+        http=fake_http,
+    )
+
+    result = client.navigate("https://www.e.leclerc/recherche?text=riz")
+
+    assert result.action == "open"
+    assert result.data["tabId"] == "fallback-tab"
+    assert "wrapper_error" in result.data
+    assert calls == [
+        (
+            "POST",
+            "/tabs",
+            {
+                "userId": "panier",
+                "sessionKey": "leclerc",
+                "url": "https://www.e.leclerc/recherche?text=riz",
+            },
+        )
+    ]
 
 
 def test_open_drive_searches_uses_managed_browser_client() -> None:

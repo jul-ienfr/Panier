@@ -415,7 +415,7 @@ def drive_plan(
 def drive_open(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
     drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
-    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "panier",
+    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
     site: Annotated[str | None, typer.Option("--site", help="Site Managed Browser")] = None,
     browser_command: Annotated[
         str | None,

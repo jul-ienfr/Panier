@@ -144,6 +144,7 @@ _DRIVE_SEARCH_URLS = {
     "leclerc": "https://www.e.leclerc/recherche?text={query}",
     "carrefour": "https://www.carrefour.fr/s?q={query}",
     "intermarche": "https://www.intermarche.com/recherche/{query}",
+    "auchan": "https://www.auchan.fr/recherche?text={query}",
 }
 
 
