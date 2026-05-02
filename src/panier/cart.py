@@ -93,6 +93,23 @@ async ({ item, product, quantity, dryRun }) => {
     .trim()
     .toLowerCase();
   const wanted = norm(product || item);
+  const challengeHost = /captcha-delivery|datadome/i.test(document.documentElement?.outerHTML || '');
+  if (challengeHost) {
+    return {
+      item,
+      product,
+      url: location.href,
+      catalog_found: false,
+      addable: false,
+      inserted: false,
+      clicked: false,
+      changed_after_click: false,
+      button_label: '',
+      visible_text: '',
+      blocked_by: 'anti_bot_challenge',
+      error: 'Leclerc bloque la page par challenge anti-bot/captcha; ajout panier non exécuté.',
+    };
+  }
   const wantedTokens = wanted.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
   const textOf = (node) => norm(node?.innerText || node?.textContent || '');
   const nodes = Array.from(document.querySelectorAll(

@@ -306,6 +306,10 @@ def _flow_payload_from_line_results(
             "url": result.get("url") or line.url or line.search_url,
             "button_label": result.get("button_label") or "",
         }
+        if result.get("blocked_by"):
+            entry["blocked_by"] = result.get("blocked_by")
+        if result.get("error"):
+            entry["error"] = result.get("error")
         if result.get("catalog_found"):
             catalog_found.append({**entry, "status": "catalog_found"})
         if result.get("addable"):
@@ -441,6 +445,16 @@ def echo_cart_flow_result(store: str, result: BrowserCommandResult, *, dry_run: 
     message = value.get("message")
     if message:
         typer.echo(f"  Note: {message}")
+    line_results = (
+        value.get("line_results") if isinstance(value.get("line_results"), list) else []
+    )
+    blocked = [
+        entry for entry in line_results if isinstance(entry, dict) and entry.get("blocked_by")
+    ]
+    for entry in blocked:
+        target = entry.get("item") or entry.get("product")
+        reason = entry.get("error") or entry.get("blocked_by")
+        typer.echo(f"  Blocage {target}: {reason}", err=True)
     if value.get("requires_live_flow"):
         typer.echo(
             "  Attention: le clic réel d'ajout panier n'est pas encore "
