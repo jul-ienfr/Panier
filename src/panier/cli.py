@@ -175,6 +175,18 @@ def recipes_to_shopping_payload(items: list[ShoppingItem]) -> dict[str, list[dic
     return {"items": [item.model_dump(mode="json", exclude_none=True) for item in items]}
 
 
+def managed_browser_profile_for_drive(profile: str, drive: str) -> str:
+    """Résout le profil Managed Browser adapté au drive.
+
+    Le profil historique `courses` reste valide pour Leclerc, mais Auchan est déclaré
+    côté Managed Browser sous `courses-auchan`. Utiliser `courses` avec `site=auchan`
+    déclenche une erreur HTTP 500 de politique de profil.
+    """
+    if normalize_name(profile) == "courses" and normalize_name(drive) == "auchan":
+        return "courses-auchan"
+    return profile
+
+
 def collect_offers_for_drives(
     items: list[ShoppingItem],
     drives: list[str],
@@ -185,7 +197,8 @@ def collect_offers_for_drives(
 ) -> list[StoreOffer]:
     offers: list[StoreOffer] = []
     for drive in drives:
-        browser = ManagedBrowserClient(command=browser_command, profile=profile, site=drive)
+        resolved_profile = managed_browser_profile_for_drive(profile, drive)
+        browser = ManagedBrowserClient(command=browser_command, profile=resolved_profile, site=drive)
         try:
             collected = collect_drive_offers(items, drive, browser, max_results=max_results)
         except ManagedBrowserError as exc:
@@ -714,9 +727,10 @@ def drive_collect(
 ) -> None:
     data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    resolved_profile = managed_browser_profile_for_drive(profile, site or drive)
     browser = ManagedBrowserClient(
         command=browser_command,
-        profile=profile,
+        profile=resolved_profile,
         site=site or drive,
     )
     try:

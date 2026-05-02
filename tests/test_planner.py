@@ -6,7 +6,7 @@ import yaml
 from typer.testing import CliRunner
 
 import panier.cli as cli
-from panier.cli import app
+from panier.cli import app, managed_browser_profile_for_drive
 from panier.drive import (
     BrandType,
     DriveProduct,
@@ -868,6 +868,73 @@ print(json.dumps({'tabId': 'default-profile-ok'}))
     assert "--profile" in argv
     assert argv[argv.index("--profile") + 1] == "courses"
     assert argv[argv.index("--site") + 1] == "leclerc"
+
+
+def test_auchan_uses_dedicated_managed_browser_profile() -> None:
+    assert managed_browser_profile_for_drive("courses", "auchan") == "courses-auchan"
+    assert managed_browser_profile_for_drive("courses", "leclerc") == "courses"
+    assert managed_browser_profile_for_drive("custom", "auchan") == "custom"
+
+
+def test_drive_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch) -> None:
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def fake_collect(items, drive, browser, products=None, max_results=5):
+        seen["profile"] = browser.profile
+        seen["site"] = browser.site
+        return []
+
+    monkeypatch.setattr(cli, "collect_drive_offers", fake_collect)
+
+    result = CliRunner().invoke(app, ["drive", "collect", str(shopping), "--drive", "auchan"])
+
+    assert result.exit_code == 0
+    assert seen == {"profile": "courses-auchan", "site": "auchan"}
+
+
+def test_plan_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: Riz rapide
+  tags: [budget, rapide, equilibre]
+  ingredients:
+    - name: riz
+      quantity: 100
+      unit: g
+""".strip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, str] = {}
+
+    def fake_collect(items, drive, browser, products=None, max_results=5):
+        seen["profile"] = browser.profile
+        seen["site"] = browser.site
+        return [
+            StoreOffer(store=drive, item="riz", product="Riz basmati 1kg", price=2.5, unit_price=2.5)
+        ]
+
+    monkeypatch.setattr(cli, "collect_drive_offers", fake_collect)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "plan",
+            "--data-dir",
+            str(tmp_path),
+            "--meals",
+            "1",
+            "--include-tags",
+            "budget,rapide",
+            "--collect",
+            "auchan",
+            "--no-pantry",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen == {"profile": "courses-auchan", "site": "auchan"}
 
 
 def test_managed_browser_client_builds_wrapper_command() -> None:
