@@ -31,6 +31,7 @@ cp examples/recipes.yaml ~/.panier/recipes.yaml
 cp examples/pantry.yaml ~/.panier/pantry.yaml
 panier recipe suggest --meals 3
 panier plan --meals 3
+panier plan --meals 2 --prices examples/prices.yaml --max-stores 2
 panier compare examples/shopping-list.yaml --prices examples/prices.yaml --max-stores 2
 ```
 

@@ -29,3 +29,23 @@ offers:
     product: Haricots rouges 400g x2
     price: 1.90
     unit_price: 2.38
+  - store: leclerc
+    item: pâtes
+    product: Pâtes coquillettes 1kg
+    price: 1.35
+    unit_price: 1.35
+  - store: intermarche
+    item: pâtes
+    product: Pâtes coquillettes 1kg
+    price: 1.55
+    unit_price: 1.55
+  - store: leclerc
+    item: thon
+    product: Thon au naturel x3
+    price: 4.50
+    unit_price: 15.00
+  - store: intermarche
+    item: thon
+    product: Thon au naturel x3
+    price: 4.20
+    unit_price: 14.00

@@ -56,6 +56,60 @@ def load_profile(data_dir: Path) -> FoodProfile:
     return load_yaml_model(path, FoodProfile)
 
 
+def load_recipes(data_dir: Path) -> list[Recipe]:
+    path = recipes_path(data_dir)
+    if not path.exists():
+        raise typer.BadParameter(f"Fichier recettes absent : {path}")
+    return [
+        Recipe.model_validate(item)
+        for item in yaml.safe_load(path.read_text(encoding="utf-8"))
+    ]
+
+
+def load_pantry_if_exists(data_dir: Path) -> Pantry | None:
+    path = pantry_path(data_dir)
+    if not path.exists():
+        return None
+    return load_yaml_model(path, Pantry)
+
+
+def load_offers(prices: Path) -> list[StoreOffer]:
+    price_data = yaml.safe_load(prices.read_text(encoding="utf-8")) or {}
+    return [StoreOffer.model_validate(offer) for offer in price_data.get("offers", [])]
+
+
+def format_item(item: ShoppingItem) -> str:
+    quantity = f" {item.quantity:g}" if item.quantity is not None else ""
+    unit = f" {item.unit}" if item.unit else ""
+    return f"{item.name}{quantity}{unit}"
+
+
+def echo_recommendation(
+    items: list[ShoppingItem],
+    recommendation_items: dict[str, StoreOffer],
+    mode: PriceMode,
+    stores: tuple[str, ...],
+    total: float,
+    savings_vs_best_single: float,
+    reason: str,
+) -> None:
+    typer.echo("\nRecommandation achat:")
+    typer.echo(f"Mode: {mode}")
+    typer.echo(f"Drives: {', '.join(stores)}")
+    typer.echo(f"Total: {total:.2f} €")
+    if savings_vs_best_single:
+        typer.echo(f"Économie vs meilleur panier simple: {savings_vs_best_single:.2f} €")
+    typer.echo(f"Raison: {reason}")
+    typer.echo("\nDétail achat:")
+    items_by_name = {item.name: item for item in items}
+    for item_name, offer in recommendation_items.items():
+        requested = format_item(items_by_name[item_name])
+        typer.echo(
+            f"- {requested}: {offer.product} — {offer.store} — "
+            f"{offer.price:.2f} € ({offer.confidence})"
+        )
+
+
 @app.callback()
 def main(
     version: Annotated[bool, typer.Option("--version", help="Afficher la version.")] = False,
@@ -148,15 +202,7 @@ def recipe_suggest(
     meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    profile = load_profile(data_dir)
-    path = recipes_path(data_dir)
-    if not path.exists():
-        raise typer.BadParameter(f"Fichier recettes absent : {path}")
-    recipes = [
-        Recipe.model_validate(item)
-        for item in yaml.safe_load(path.read_text(encoding="utf-8"))
-    ]
-    selected = select_meals(recipes, profile, meals)
+    selected = select_meals(load_recipes(data_dir), load_profile(data_dir), meals)
     for recipe in selected:
         typer.echo(f"- {recipe.name}")
 
@@ -165,20 +211,16 @@ def recipe_suggest(
 def plan(
     meals: Annotated[int, typer.Option("--meals", min=1)] = 3,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
+    max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
 ) -> None:
-    profile = load_profile(data_dir)
-    path = recipes_path(data_dir)
-    if not path.exists():
-        raise typer.BadParameter(f"Fichier recettes absent : {path}")
-    recipes = [
-        Recipe.model_validate(item)
-        for item in yaml.safe_load(path.read_text(encoding="utf-8"))
-    ]
-    selected = select_meals(recipes, profile, meals)
+    selected = select_meals(load_recipes(data_dir), load_profile(data_dir), meals)
     items = consolidate_ingredients(selected)
-    pantry_file = pantry_path(data_dir)
-    if pantry_file.exists():
-        items = subtract_pantry(items, load_yaml_model(pantry_file, Pantry))
+    pantry = load_pantry_if_exists(data_dir)
+    if pantry is not None:
+        items = subtract_pantry(items, pantry)
+
     typer.echo("Recettes:")
     for recipe in selected:
         typer.echo(f"- {recipe.name}")
@@ -187,9 +229,26 @@ def plan(
         typer.echo("- rien à acheter")
         return
     for item in items:
-        quantity = f" {item.quantity:g}" if item.quantity is not None else ""
-        unit = f" {item.unit}" if item.unit else ""
-        typer.echo(f"- {item.name}{quantity}{unit}")
+        typer.echo(f"- {format_item(item)}")
+
+    if prices is None:
+        return
+
+    recommendation = recommend_basket(
+        items,
+        load_offers(prices),
+        mode=mode,
+        max_stores=max_stores,
+    )
+    echo_recommendation(
+        items=items,
+        recommendation_items=recommendation.by_item,
+        mode=recommendation.mode,
+        stores=recommendation.stores,
+        total=recommendation.total,
+        savings_vs_best_single=recommendation.savings_vs_best_single,
+        reason=recommendation.reason,
+    )
 
 
 @app.command("compare")
@@ -200,23 +259,20 @@ def compare(
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
 ) -> None:
     list_data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    price_data = yaml.safe_load(prices.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in list_data.get("items", [])]
-    offers = [StoreOffer.model_validate(offer) for offer in price_data.get("offers", [])]
-    recommendation = recommend_basket(items, offers, mode=mode, max_stores=max_stores)
+    recommendation = recommend_basket(
+        items,
+        load_offers(prices),
+        mode=mode,
+        max_stores=max_stores,
+    )
 
-    typer.echo(f"Mode: {recommendation.mode}")
-    typer.echo(f"Drives: {', '.join(recommendation.stores)}")
-    typer.echo(f"Total: {recommendation.total:.2f} €")
-    if recommendation.savings_vs_best_single:
-        typer.echo(
-            "Économie vs meilleur panier simple: "
-            f"{recommendation.savings_vs_best_single:.2f} €"
-        )
-    typer.echo(f"Raison: {recommendation.reason}")
-    typer.echo("\nDétail:")
-    for item, offer in recommendation.by_item.items():
-        typer.echo(
-            f"- {item}: {offer.product} — {offer.store} — "
-            f"{offer.price:.2f} € ({offer.confidence})"
-        )
+    echo_recommendation(
+        items=items,
+        recommendation_items=recommendation.by_item,
+        mode=recommendation.mode,
+        stores=recommendation.stores,
+        total=recommendation.total,
+        savings_vs_best_single=recommendation.savings_vs_best_single,
+        reason=recommendation.reason,
+    )

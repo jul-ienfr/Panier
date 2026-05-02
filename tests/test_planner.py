@@ -1,3 +1,8 @@
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from panier.cli import app
 from panier.models import FoodProfile, Pantry, PriceMode, Recipe, ShoppingItem, StoreOffer
 from panier.planner import consolidate_ingredients, recommend_basket, select_meals, subtract_pantry
 
@@ -70,3 +75,98 @@ def test_economic_can_split_between_stores() -> None:
 
     assert recommendation.stores == ("auchan", "intermarche")
     assert recommendation.total == 2.0
+
+
+def test_plan_with_prices_outputs_optimized_basket(tmp_path: Path) -> None:
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: Chili
+  ingredients:
+    - name: riz
+      quantity: 300
+      unit: g
+    - name: haricots rouges
+      quantity: 1
+      unit: boîte
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+- name: Pâtes thon
+  ingredients:
+    - name: pâtes
+      quantity: 250
+      unit: g
+    - name: thon
+      quantity: 1
+      unit: boîte
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pantry.yaml").write_text(
+        """
+items:
+  - name: riz
+    quantity: 150
+    unit: g
+""",
+        encoding="utf-8",
+    )
+    prices = tmp_path / "prices.yaml"
+    prices.write_text(
+        """
+offers:
+  - store: leclerc
+    item: riz
+    product: Riz 1kg
+    price: 1.80
+  - store: leclerc
+    item: haricots rouges
+    product: Haricots rouges
+    price: 2.20
+  - store: leclerc
+    item: tomates concassées
+    product: Tomates concassées
+    price: 1.70
+  - store: leclerc
+    item: pâtes
+    product: Pâtes 1kg
+    price: 1.35
+  - store: leclerc
+    item: thon
+    product: Thon x3
+    price: 4.50
+  - store: intermarche
+    item: riz
+    product: Riz 1kg
+    price: 1.65
+  - store: intermarche
+    item: haricots rouges
+    product: Haricots rouges
+    price: 1.90
+  - store: intermarche
+    item: tomates concassées
+    product: Tomates concassées
+    price: 2.10
+  - store: intermarche
+    item: pâtes
+    product: Pâtes 1kg
+    price: 1.55
+  - store: intermarche
+    item: thon
+    product: Thon x3
+    price: 4.20
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["plan", "--data-dir", str(tmp_path), "--meals", "2", "--prices", str(prices)],
+    )
+
+    assert result.exit_code == 0
+    assert "Liste à acheter:" in result.output
+    assert "- riz 150 g" in result.output
+    assert "Recommandation achat:" in result.output
+    assert "Total:" in result.output
+    assert "Détail achat:" in result.output
