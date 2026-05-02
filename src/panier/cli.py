@@ -26,6 +26,7 @@ from panier.models import (
     normalize_name,
 )
 from panier.planner import (
+    CompareBy,
     consolidate_ingredients,
     consume_pantry,
     low_stock_items,
@@ -150,6 +151,7 @@ def echo_recommendation(
     total: float,
     savings_vs_best_single: float,
     reason: str,
+    compare_by: CompareBy = "price",
 ) -> None:
     typer.echo("\nRecommandation achat:")
     typer.echo(f"Mode: {mode}")
@@ -164,8 +166,38 @@ def echo_recommendation(
         requested = format_item(items_by_name[item_name])
         typer.echo(
             f"- {requested}: {offer.product} — {offer.store} — "
-            f"{offer.price:.2f} € ({offer.confidence})"
+            f"{format_offer_price(offer, items_by_name[item_name], compare_by)} "
+            f"({offer.confidence})"
         )
+
+
+def format_offer_price(
+    offer: StoreOffer, item: ShoppingItem | None = None, compare_by: CompareBy = "price"
+) -> str:
+    price = f"{offer.price:.2f} €"
+    if compare_by == "unit_price" and offer.unit_price is not None:
+        return f"{price}; {offer.unit_price:.2f} €/{unit_price_label(item)}"
+    return price
+
+
+def unit_price_label(item: ShoppingItem | None) -> str:
+    if item is None or item.unit is None:
+        return "kg/L"
+    unit = normalize_name(item.unit)
+    if unit in {"l", "litre", "litres", "ml", "cl"}:
+        return "L"
+    if unit in {"g", "kg", "gramme", "grammes"}:
+        return "kg"
+    return "unité"
+
+
+def normalize_compare_by(value: str) -> CompareBy:
+    normalized = normalize_name(value).replace("-", "_")
+    if normalized in {"unit_price", "prix_unitaire", "prix_quantite", "kg", "l"}:
+        return "unit_price"
+    if normalized == "price":
+        return "price"
+    raise typer.BadParameter("compare-by doit être 'price' ou 'unit-price'")
 
 
 @app.callback()
@@ -386,12 +418,20 @@ def shopping_from_recipe(
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
     items = subtract_pantry(recipe_items(load_recipe_file(recipe)), load_pantry(data_dir))
     echo_items("Liste à acheter:", items)
     if prices is None or not items:
         return
-    recommendation = recommend_basket(items, load_offers(prices), mode=mode, max_stores=max_stores)
+    comparison = normalize_compare_by(compare_by)
+    recommendation = recommend_basket(
+        items,
+        load_offers(prices),
+        mode=mode,
+        max_stores=max_stores,
+        compare_by=comparison,
+    )
     echo_recommendation(
         items=items,
         recommendation_items=recommendation.by_item,
@@ -400,6 +440,7 @@ def shopping_from_recipe(
         total=recommendation.total,
         savings_vs_best_single=recommendation.savings_vs_best_single,
         reason=recommendation.reason,
+        compare_by=comparison,
     )
 
 
@@ -453,19 +494,22 @@ def drive_open(
 def drive_pick(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [...]")],
     prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
     data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
     offers = load_offers(prices)
+    comparison = normalize_compare_by(compare_by)
     typer.echo("Meilleurs produits:")
     for item in items:
-        chosen = best_offer_for_item(item, offers)
+        chosen = best_offer_for_item(item, offers, compare_by=comparison)
         if chosen is None:
             typer.echo(f"- {format_item(item)}: aucune offre")
             continue
         typer.echo(
             f"- {format_item(item)}: {chosen.offer.product} — {chosen.offer.store} — "
-            f"{chosen.offer.price:.2f} € (score {chosen.score:.2f}; {chosen.reason})"
+            f"{format_offer_price(chosen.offer, item, comparison)} "
+            f"(score {chosen.score:.2f}; {chosen.reason})"
         )
 
 
@@ -523,6 +567,7 @@ def plan(
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
     selected = select_meals(load_recipes(data_dir), load_profile(data_dir), meals)
     items = consolidate_ingredients(selected)
@@ -543,11 +588,13 @@ def plan(
     if prices is None:
         return
 
+    comparison = normalize_compare_by(compare_by)
     recommendation = recommend_basket(
         items,
         load_offers(prices),
         mode=mode,
         max_stores=max_stores,
+        compare_by=comparison,
     )
     echo_recommendation(
         items=items,
@@ -557,6 +604,7 @@ def plan(
         total=recommendation.total,
         savings_vs_best_single=recommendation.savings_vs_best_single,
         reason=recommendation.reason,
+        compare_by=comparison,
     )
 
 
@@ -566,14 +614,17 @@ def compare(
     prices: Annotated[Path, typer.Option("--prices", help="YAML: offers: [...]")],
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
     list_data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in list_data.get("items", [])]
+    comparison = normalize_compare_by(compare_by)
     recommendation = recommend_basket(
         items,
         load_offers(prices),
         mode=mode,
         max_stores=max_stores,
+        compare_by=comparison,
     )
 
     echo_recommendation(
@@ -584,4 +635,5 @@ def compare(
         total=recommendation.total,
         savings_vs_best_single=recommendation.savings_vs_best_single,
         reason=recommendation.reason,
+        compare_by=comparison,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
+from typing import Literal
 
 from panier.models import (
     FoodProfile,
@@ -24,6 +25,8 @@ class BasketRecommendation:
     savings_vs_best_single: float
     reason: str
 
+
+CompareBy = Literal["price", "unit_price"]
 
 _UNIT_FACTORS: dict[str, tuple[str, float]] = {
     "g": ("g", 1.0),
@@ -215,6 +218,7 @@ def recommend_basket(
     max_stores: int = 2,
     split_min_savings_eur: float = 8.0,
     split_min_savings_percent: float = 10.0,
+    compare_by: CompareBy = "price",
 ) -> BasketRecommendation:
     if max_stores < 1:
         raise ValueError("max_stores must be >= 1")
@@ -234,6 +238,7 @@ def recommend_basket(
         requested_items,
         offers_by_item,
         [(store,) for store in stores],
+        compare_by=compare_by,
     )
     if best_single is None:
         raise ValueError("no single store can satisfy the full basket")
@@ -252,7 +257,9 @@ def recommend_basket(
     for count in range(1, min(max_stores, len(stores)) + 1):
         store_sets.extend(combinations(stores, count))
 
-    best_split = _best_for_store_sets(requested_items, offers_by_item, store_sets)
+    best_split = _best_for_store_sets(
+        requested_items, offers_by_item, store_sets, compare_by=compare_by
+    )
     if best_split is None:
         raise ValueError("no store combination can satisfy the full basket")
 
@@ -287,13 +294,16 @@ def _best_for_store_sets(
     requested_items: list[str],
     offers_by_item: dict[str, list[StoreOffer]],
     store_sets: list[tuple[str, ...]],
+    compare_by: CompareBy = "price",
 ) -> tuple[tuple[str, ...], float, dict[str, StoreOffer]] | None:
     best: tuple[tuple[str, ...], float, dict[str, StoreOffer]] | None = None
+    best_metric: float | None = None
 
     for store_set in store_sets:
         allowed = set(store_set)
         chosen: dict[str, StoreOffer] = {}
         total = 0.0
+        comparable_total = 0.0
         possible = True
 
         for item in requested_items:
@@ -301,11 +311,22 @@ def _best_for_store_sets(
             if not candidates:
                 possible = False
                 break
-            offer = min(candidates, key=lambda candidate: candidate.price)
+            offer = min(
+                candidates,
+                key=lambda candidate: _offer_compare_value(candidate, compare_by),
+            )
             chosen[item] = offer
             total += float(offer.price)
+            comparable_total += _offer_compare_value(offer, compare_by)
 
-        if possible and (best is None or total < best[1]):
+        if possible and (best_metric is None or comparable_total < best_metric):
+            best_metric = comparable_total
             best = (tuple(sorted(store_set)), total, chosen)
 
     return best
+
+
+def _offer_compare_value(offer: StoreOffer, compare_by: CompareBy) -> float:
+    if compare_by == "unit_price" and offer.unit_price is not None:
+        return float(offer.unit_price)
+    return float(offer.price)

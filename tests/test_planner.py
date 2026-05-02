@@ -91,6 +91,34 @@ def test_economic_can_split_between_stores() -> None:
     assert recommendation.total == 2.0
 
 
+def test_recommend_basket_can_compare_by_unit_price() -> None:
+    items = [ShoppingItem(name="huile", quantity=1, unit="l")]
+    offers = [
+        StoreOffer(
+            store="leclerc",
+            item="huile",
+            product="Huile 50cl",
+            price=2.10,
+            unit_price=4.20,
+        ),
+        StoreOffer(
+            store="auchan",
+            item="huile",
+            product="Huile 1L",
+            price=3.00,
+            unit_price=3.00,
+        ),
+    ]
+
+    recommendation = recommend_basket(
+        items, offers, PriceMode.SIMPLE, max_stores=1, compare_by="unit_price"
+    )
+
+    assert recommendation.stores == ("auchan",)
+    assert recommendation.total == 3.0
+    assert recommendation.by_item["huile"].product == "Huile 1L"
+
+
 def test_plan_with_prices_outputs_optimized_basket(tmp_path: Path) -> None:
     (tmp_path / "recipes.yaml").write_text(
         """
@@ -548,6 +576,7 @@ offers:
     item: tomates concassées
     product: Tomates concassées 400g
     price: 1.20
+    unit_price: 3.25
   - store: leclerc
     item: tomates concassées
     product: Tomates fraîches 1kg
@@ -557,7 +586,9 @@ offers:
     )
 
     plan_result = runner.invoke(app, ["drive", "plan", str(shopping), "--drive", "leclerc"])
-    pick_result = runner.invoke(app, ["drive", "pick", str(shopping), str(prices)])
+    pick_result = runner.invoke(
+        app, ["drive", "pick", str(shopping), str(prices), "--compare-by", "unit-price"]
+    )
 
     assert plan_result.exit_code == 0
     assert "Recherches à lancer:" in plan_result.output
@@ -565,6 +596,7 @@ offers:
     assert pick_result.exit_code == 0
     assert "Meilleurs produits:" in pick_result.output
     assert "Tomates concassées 400g" in pick_result.output
+    assert "3.25 €/unité" in pick_result.output
 
 
 def test_drive_cli_open_reports_managed_browser_error(tmp_path: Path) -> None:

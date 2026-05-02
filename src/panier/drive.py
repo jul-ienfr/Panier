@@ -251,7 +251,9 @@ def collect_drive_offers(
     return offers
 
 
-def best_offer_for_item(item: ShoppingItem, offers: list[StoreOffer]) -> OfferScore | None:
+def best_offer_for_item(
+    item: ShoppingItem, offers: list[StoreOffer], compare_by: str = "price"
+) -> OfferScore | None:
     """Choisit l'offre la plus pertinente pour une ligne de courses."""
     scored = [score_offer(item, offer) for offer in offers if offer.item == item.name]
     if not scored:
@@ -260,7 +262,7 @@ def best_offer_for_item(item: ShoppingItem, offers: list[StoreOffer]) -> OfferSc
         scored,
         key=lambda scored_offer: (
             scored_offer.score,
-            -(scored_offer.offer.unit_price or scored_offer.offer.price),
+            -_offer_compare_value(scored_offer.offer, compare_by),
             -scored_offer.offer.price,
         ),
     )
@@ -286,6 +288,12 @@ def score_offer(item: ShoppingItem, offer: StoreOffer) -> OfferScore:
     if confidence_bonus:
         parts.append(f"confiance {offer.confidence}")
     return OfferScore(offer=offer, score=score, reason=", ".join(parts))
+
+
+def _offer_compare_value(offer: StoreOffer, compare_by: str) -> float:
+    if compare_by == "unit_price" and offer.unit_price is not None:
+        return float(offer.unit_price)
+    return float(offer.price)
 
 
 def _offer_from_browser_item(
