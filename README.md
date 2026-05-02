@@ -27,8 +27,10 @@ pip install -e '.[dev]'
 panier profile init
 panier profile dislike add oignons
 panier profile allergy add arachides
+panier pantry init
+panier pantry add riz --quantity 150 --unit g
+panier pantry list
 cp examples/recipes.yaml ~/.panier/recipes.yaml
-cp examples/pantry.yaml ~/.panier/pantry.yaml
 panier recipe suggest --meals 3
 panier plan --meals 3
 panier plan --meals 2 --prices examples/prices.yaml --max-stores 2

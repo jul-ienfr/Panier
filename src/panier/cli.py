@@ -31,8 +31,10 @@ app = typer.Typer(
 )
 profile_app = typer.Typer(help="Gérer le profil alimentaire.")
 recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
+pantry_app = typer.Typer(help="Gérer le stock local.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
+app.add_typer(pantry_app, name="pantry")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -66,11 +68,22 @@ def load_recipes(data_dir: Path) -> list[Recipe]:
     ]
 
 
+def load_pantry(data_dir: Path) -> Pantry:
+    path = pantry_path(data_dir)
+    if not path.exists():
+        return Pantry()
+    return load_yaml_model(path, Pantry)
+
+
 def load_pantry_if_exists(data_dir: Path) -> Pantry | None:
     path = pantry_path(data_dir)
     if not path.exists():
         return None
     return load_yaml_model(path, Pantry)
+
+
+def save_pantry(data_dir: Path, pantry: Pantry) -> None:
+    dump_yaml(pantry_path(data_dir), pantry)
 
 
 def load_offers(prices: Path) -> list[StoreOffer]:
@@ -195,6 +208,85 @@ def profile_like(
     if action != "add":
         raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
     add_preference("likes", value, data_dir)
+
+
+@pantry_app.command("init")
+def pantry_init(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    path = pantry_path(data_dir)
+    if path.exists() and not force:
+        typer.echo(f"Stock déjà présent : {path}")
+        return
+    dump_yaml(path, Pantry())
+    typer.echo(f"Stock créé : {path}")
+
+
+@pantry_app.command("list")
+def pantry_list(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    pantry = load_pantry(data_dir)
+    if not pantry.items:
+        typer.echo("Stock vide")
+        return
+    for item in pantry.items:
+        typer.echo(f"- {format_item(item)}")
+
+
+@pantry_app.command("add")
+def pantry_add(
+    name: Annotated[str, typer.Argument()],
+    quantity: Annotated[float | None, typer.Option("--quantity", "-q", min=0)] = None,
+    unit: Annotated[str | None, typer.Option("--unit", "-u")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    pantry = load_pantry(data_dir)
+    item = ShoppingItem(name=name, quantity=quantity, unit=unit)
+    matched = False
+    for existing in pantry.items:
+        if existing.name == item.name and existing.unit == item.unit:
+            matched = True
+            if existing.quantity is None or item.quantity is None:
+                existing.quantity = item.quantity
+            else:
+                existing.quantity += item.quantity
+            break
+    if not matched:
+        pantry.items.append(item)
+    save_pantry(data_dir, pantry)
+    typer.echo(f"Stock ajouté : {format_item(item)}")
+
+
+@pantry_app.command("remove")
+def pantry_remove(
+    name: Annotated[str, typer.Argument()],
+    quantity: Annotated[float | None, typer.Option("--quantity", "-q", min=0)] = None,
+    unit: Annotated[str | None, typer.Option("--unit", "-u")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    pantry = load_pantry(data_dir)
+    item = ShoppingItem(name=name, quantity=quantity, unit=unit)
+    remaining: list[ShoppingItem] = []
+    removed = False
+    for existing in pantry.items:
+        if existing.name != item.name or existing.unit != item.unit:
+            remaining.append(existing)
+            continue
+        removed = True
+        if quantity is None or existing.quantity is None:
+            continue
+        new_quantity = existing.quantity - quantity
+        if new_quantity > 0:
+            existing.quantity = new_quantity
+            remaining.append(existing)
+    pantry.items = remaining
+    save_pantry(data_dir, pantry)
+    if removed:
+        typer.echo(f"Stock retiré : {format_item(item)}")
+    else:
+        typer.echo(f"Stock introuvable : {format_item(item)}")
 
 
 @recipe_app.command("suggest")

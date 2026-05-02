@@ -170,3 +170,60 @@ offers:
     assert "Recommandation achat:" in result.output
     assert "Total:" in result.output
     assert "Détail achat:" in result.output
+
+
+def test_pantry_cli_add_list_and_remove(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    init_result = runner.invoke(app, ["pantry", "init", "--data-dir", str(tmp_path)])
+    add_result = runner.invoke(
+        app,
+        [
+            "pantry",
+            "add",
+            "Riz",
+            "--quantity",
+            "200",
+            "--unit",
+            "g",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    add_more_result = runner.invoke(
+        app,
+        [
+            "pantry",
+            "add",
+            "riz",
+            "--quantity",
+            "100",
+            "--unit",
+            "g",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    list_result = runner.invoke(app, ["pantry", "list", "--data-dir", str(tmp_path)])
+    remove_result = runner.invoke(
+        app,
+        [
+            "pantry",
+            "remove",
+            "riz",
+            "--quantity",
+            "150",
+            "--unit",
+            "g",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    list_after_remove = runner.invoke(app, ["pantry", "list", "--data-dir", str(tmp_path)])
+
+    assert init_result.exit_code == 0
+    assert add_result.exit_code == 0
+    assert add_more_result.exit_code == 0
+    assert "- riz 300 g" in list_result.output
+    assert remove_result.exit_code == 0
+    assert "- riz 150 g" in list_after_remove.output
