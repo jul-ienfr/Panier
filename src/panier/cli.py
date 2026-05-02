@@ -7,6 +7,7 @@ import typer
 import yaml
 
 from panier import __version__
+from panier.drive import best_offer_for_item, build_drive_search_plan
 from panier.models import (
     FoodProfile,
     Pantry,
@@ -35,10 +36,12 @@ profile_app = typer.Typer(help="Gérer le profil alimentaire.")
 recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
 pantry_app = typer.Typer(help="Gérer le stock local.")
 shopping_app = typer.Typer(help="Générer des listes de courses.")
+drive_app = typer.Typer(help="Préparer les recherches et paniers drive.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
 app.add_typer(shopping_app, name="shopping")
+app.add_typer(drive_app, name="drive")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -392,6 +395,39 @@ def shopping_from_recipe(
         savings_vs_best_single=recommendation.savings_vs_best_single,
         reason=recommendation.reason,
     )
+
+
+@drive_app.command("plan")
+def drive_plan(
+    shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
+    drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
+) -> None:
+    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
+    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    echo_items("Liste drive:", items)
+    typer.echo("\nRecherches à lancer:")
+    for entry in build_drive_search_plan(items, drive):
+        typer.echo(f"- {format_item(entry.item)} -> {entry.query} ({entry.confidence})")
+
+
+@drive_app.command("pick")
+def drive_pick(
+    shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [...]")],
+    prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
+) -> None:
+    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
+    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    offers = load_offers(prices)
+    typer.echo("Meilleurs produits:")
+    for item in items:
+        chosen = best_offer_for_item(item, offers)
+        if chosen is None:
+            typer.echo(f"- {format_item(item)}: aucune offre")
+            continue
+        typer.echo(
+            f"- {format_item(item)}: {chosen.offer.product} — {chosen.offer.store} — "
+            f"{chosen.offer.price:.2f} € (score {chosen.score:.2f}; {chosen.reason})"
+        )
 
 
 @recipe_app.command("suggest")

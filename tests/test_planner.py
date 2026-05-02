@@ -3,6 +3,13 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from panier.cli import app
+from panier.drive import (
+    BrandType,
+    DriveProduct,
+    best_offer_for_item,
+    build_drive_search_plan,
+    build_drive_search_query,
+)
 from panier.models import FoodProfile, Pantry, PriceMode, Recipe, ShoppingItem, StoreOffer
 from panier.planner import consolidate_ingredients, recommend_basket, select_meals, subtract_pantry
 
@@ -336,3 +343,102 @@ items:
     assert "Liste à acheter:" in result.output
     assert "- pâtes 150 g" in result.output
     assert "- thon 1 boîte" in result.output
+
+
+def test_build_drive_search_query_handles_store_brands() -> None:
+    item = ShoppingItem(name="cola")
+    product = DriveProduct(
+        name="cola",
+        brand="marque repère",
+        brand_type=BrandType.STORE_BRAND,
+        store_brand_affinity="leclerc",
+    )
+
+    assert build_drive_search_query(item, "leclerc", product) == "cola marque repère"
+    assert build_drive_search_query(item, "carrefour", product) == "cola"
+
+
+def test_build_drive_search_plan_marks_catalog_matches_high_confidence() -> None:
+    items = [ShoppingItem(name="Riz"), ShoppingItem(name="tomates")]
+    products = {"riz": DriveProduct(name="riz basmati", brand_type=BrandType.GENERIC)}
+
+    plan = build_drive_search_plan(items, "leclerc", products)
+
+    assert [(item.query, item.confidence) for item in plan] == [
+        ("riz basmati", "high"),
+        ("tomates", "low"),
+    ]
+
+
+def test_best_offer_for_item_prefers_relevance_then_unit_price() -> None:
+    item = ShoppingItem(name="tomates concassées", quantity=1, unit="boîte")
+    offers = [
+        StoreOffer(
+            store="leclerc",
+            item="tomates concassées",
+            product="Tomates rondes fraîches 1kg",
+            price=2.20,
+            unit_price=2.20,
+            confidence="medium",
+        ),
+        StoreOffer(
+            store="leclerc",
+            item="tomates concassées",
+            product="Tomates concassées boîte 400g",
+            price=1.30,
+            unit_price=3.25,
+            confidence="exact",
+        ),
+    ]
+
+    chosen = best_offer_for_item(item, offers)
+
+    assert chosen is not None
+    assert chosen.offer.product == "Tomates concassées boîte 400g"
+    assert chosen.score > 0.5
+
+
+def test_drive_cli_plan_and_pick(tmp_path: Path) -> None:
+    runner = CliRunner()
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text(
+        """
+items:
+  - name: riz
+    quantity: 150
+    unit: g
+  - name: tomates concassées
+    quantity: 1
+    unit: boîte
+""",
+        encoding="utf-8",
+    )
+    prices = tmp_path / "prices.yaml"
+    prices.write_text(
+        """
+offers:
+  - store: leclerc
+    item: riz
+    product: Riz basmati 1kg
+    price: 1.80
+  - store: leclerc
+    item: tomates concassées
+    product: Tomates concassées 400g
+    price: 1.20
+  - store: leclerc
+    item: tomates concassées
+    product: Tomates fraîches 1kg
+    price: 1.10
+""",
+        encoding="utf-8",
+    )
+
+    plan_result = runner.invoke(app, ["drive", "plan", str(shopping), "--drive", "leclerc"])
+    pick_result = runner.invoke(app, ["drive", "pick", str(shopping), str(prices)])
+
+    assert plan_result.exit_code == 0
+    assert "Recherches à lancer:" in plan_result.output
+    assert "- riz 150 g -> riz (low)" in plan_result.output
+    assert pick_result.exit_code == 0
+    assert "Meilleurs produits:" in pick_result.output
+    assert "Tomates concassées 400g" in pick_result.output

@@ -33,12 +33,26 @@ panier pantry list
 panier pantry need examples/chili.yaml
 panier pantry consume examples/chili.yaml
 panier shopping from-recipe examples/chili.yaml
+panier drive plan examples/shopping-list.yaml --drive leclerc
+panier drive pick examples/shopping-list.yaml examples/prices.yaml
 cp examples/recipes.yaml ~/.panier/recipes.yaml
 panier recipe suggest --meals 3
 panier plan --meals 3
 panier plan --meals 2 --prices examples/prices.yaml --max-stores 2
 panier compare examples/shopping-list.yaml --prices examples/prices.yaml --max-stores 2
 ```
+
+### Drive / produits
+
+Les repos de référence Leclerc montrent deux briques utiles intégrées côté CLI :
+
+```bash
+panier drive plan examples/shopping-list.yaml --drive leclerc   # requêtes à lancer sur le drive
+panier drive pick examples/shopping-list.yaml examples/prices.yaml
+```
+
+`drive plan` prépare des termes de recherche stables, avec règles de marque distributeur.
+`drive pick` choisit le meilleur produit parmi des offres déjà collectées : correspondance du type demandé d’abord, puis prix.
 
 ### Stock / pantry
 
