@@ -66,12 +66,6 @@ node /home/jul/tools/camofox-browser/scripts/managed-browser.js ... --json
 ```
 
 La commande peut être surchargée avec `PANIER_MANAGED_BROWSER_COMMAND` ou `--browser-command`.
-Si ce wrapper renvoie une erreur mais que le daemon Camofox est disponible, Panier peut ouvrir les onglets via l’API HTTP directe en configurant :
-
-```bash
-export PANIER_MANAGED_BROWSER_URL=http://127.0.0.1:9377
-```
-
 `drive pick` choisit ensuite le meilleur produit parmi des offres collectées : correspondance du type demandé d’abord, puis prix.
 
 ### Stock / pantry
