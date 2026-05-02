@@ -93,6 +93,10 @@ class ShoppingItem(BaseModel):
         return normalize_name(value)
 
 
+class Pantry(BaseModel):
+    items: list[ShoppingItem] = Field(default_factory=list)
+
+
 class StoreOffer(BaseModel):
     store: str
     item: str

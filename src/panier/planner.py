@@ -4,7 +4,15 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
 
-from panier.models import FoodProfile, PriceMode, Recipe, ShoppingItem, StoreOffer, normalize_name
+from panier.models import (
+    FoodProfile,
+    Pantry,
+    PriceMode,
+    Recipe,
+    ShoppingItem,
+    StoreOffer,
+    normalize_name,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,41 @@ def consolidate_ingredients(recipes: list[Recipe]) -> list[ShoppingItem]:
                 quantities[key] += float(ingredient.quantity)
                 has_quantity[key] = True
 
+    return _items_from_quantities(quantities, has_quantity)
+
+
+def subtract_pantry(items: list[ShoppingItem], pantry: Pantry) -> list[ShoppingItem]:
+    pantry_quantities: dict[tuple[str, str | None], float] = defaultdict(float)
+    pantry_unknown_quantity: set[tuple[str, str | None]] = set()
+
+    for item in pantry.items:
+        key = (normalize_name(item.name), item.unit)
+        if item.quantity is None:
+            pantry_unknown_quantity.add(key)
+        else:
+            pantry_quantities[key] += float(item.quantity)
+
+    remaining: list[ShoppingItem] = []
+    for item in items:
+        key = (normalize_name(item.name), item.unit)
+        if item.quantity is None:
+            if key not in pantry_unknown_quantity and pantry_quantities[key] <= 0:
+                remaining.append(item)
+            continue
+
+        missing_quantity = float(item.quantity) - pantry_quantities[key]
+        if missing_quantity > 0:
+            remaining.append(
+                ShoppingItem(name=item.name, quantity=missing_quantity, unit=item.unit)
+            )
+
+    return remaining
+
+
+def _items_from_quantities(
+    quantities: dict[tuple[str, str | None], float],
+    has_quantity: dict[tuple[str, str | None], bool],
+) -> list[ShoppingItem]:
     return [
         ShoppingItem(
             name=name,

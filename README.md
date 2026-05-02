@@ -10,6 +10,7 @@ Objectif : transformer des préférences alimentaires, allergies, recettes et li
 - Recettes locales : ingrédients + exclusions automatiques selon profil.
 - Plan repas : choisir N recettes compatibles.
 - Liste consolidée : fusionner les ingrédients nécessaires.
+- Stock local : soustraire ce qui est déjà dans le placard (`pantry.yaml`).
 - Comparaison panier : comparer des prix fournis en YAML/JSON, en mode `simple`, `economic` ou `hybrid`.
 
 ## Installation dev
@@ -26,8 +27,10 @@ pip install -e '.[dev]'
 panier profile init
 panier profile dislike add oignons
 panier profile allergy add arachides
+cp examples/recipes.yaml ~/.panier/recipes.yaml
+cp examples/pantry.yaml ~/.panier/pantry.yaml
 panier recipe suggest --meals 3
-panier plan --meals 3 --max-stores 2 --mode hybrid
+panier plan --meals 3
 panier compare examples/shopping-list.yaml --prices examples/prices.yaml --max-stores 2
 ```
 

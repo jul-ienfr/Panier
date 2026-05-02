@@ -1,5 +1,5 @@
-from panier.models import FoodProfile, PriceMode, Recipe, ShoppingItem, StoreOffer
-from panier.planner import consolidate_ingredients, recommend_basket, select_meals
+from panier.models import FoodProfile, Pantry, PriceMode, Recipe, ShoppingItem, StoreOffer
+from panier.planner import consolidate_ingredients, recommend_basket, select_meals, subtract_pantry
 
 
 def test_select_meals_excludes_disliked_ingredients() -> None:
@@ -21,6 +21,23 @@ def test_consolidate_ingredients_sums_same_unit() -> None:
     items = consolidate_ingredients(recipes)
 
     assert items == [ShoppingItem(name="riz", quantity=350, unit="g")]
+
+
+def test_subtract_pantry_keeps_only_missing_quantities() -> None:
+    items = [
+        ShoppingItem(name="riz", quantity=500, unit="g"),
+        ShoppingItem(name="tomates", quantity=2, unit="boîte"),
+        ShoppingItem(name="sel"),
+    ]
+    pantry = Pantry(
+        items=[
+            ShoppingItem(name="riz", quantity=200, unit="g"),
+            ShoppingItem(name="tomates", quantity=2, unit="boîte"),
+            ShoppingItem(name="sel"),
+        ]
+    )
+
+    assert subtract_pantry(items, pantry) == [ShoppingItem(name="riz", quantity=300, unit="g")]
 
 
 def test_hybrid_keeps_single_store_when_split_savings_too_small() -> None:

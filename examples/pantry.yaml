@@ -1,0 +1,5 @@
+items:
+  - name: riz
+    quantity: 150
+    unit: g
+  - name: sel

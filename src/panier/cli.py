@@ -9,6 +9,7 @@ import yaml
 from panier import __version__
 from panier.models import (
     FoodProfile,
+    Pantry,
     PriceMode,
     Recipe,
     ShoppingItem,
@@ -17,7 +18,12 @@ from panier.models import (
     load_yaml_model,
     normalize_name,
 )
-from panier.planner import consolidate_ingredients, recommend_basket, select_meals
+from panier.planner import (
+    consolidate_ingredients,
+    recommend_basket,
+    select_meals,
+    subtract_pantry,
+)
 
 app = typer.Typer(
     help="Planifie repas et courses optimisées multi-drive.",
@@ -37,6 +43,10 @@ def profile_path(data_dir: Path) -> Path:
 
 def recipes_path(data_dir: Path) -> Path:
     return data_dir / "recipes.yaml"
+
+
+def pantry_path(data_dir: Path) -> Path:
+    return data_dir / "pantry.yaml"
 
 
 def load_profile(data_dir: Path) -> FoodProfile:
@@ -166,10 +176,16 @@ def plan(
     ]
     selected = select_meals(recipes, profile, meals)
     items = consolidate_ingredients(selected)
+    pantry_file = pantry_path(data_dir)
+    if pantry_file.exists():
+        items = subtract_pantry(items, load_yaml_model(pantry_file, Pantry))
     typer.echo("Recettes:")
     for recipe in selected:
         typer.echo(f"- {recipe.name}")
-    typer.echo("\nListe consolidée:")
+    typer.echo("\nListe à acheter:")
+    if not items:
+        typer.echo("- rien à acheter")
+        return
     for item in items:
         quantity = f" {item.quantity:g}" if item.quantity is not None else ""
         unit = f" {item.unit}" if item.unit else ""
