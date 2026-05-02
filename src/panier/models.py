@@ -86,6 +86,8 @@ class ShoppingItem(BaseModel):
     name: str
     quantity: PositiveFloat | None = None
     unit: str | None = None
+    min_quantity: PositiveFloat | None = None
+    min_unit: str | None = None
 
     @field_validator("name")
     @classmethod

@@ -10,7 +10,7 @@ Objectif : transformer des préférences alimentaires, allergies, recettes et li
 - Recettes locales : ingrédients + exclusions automatiques selon profil.
 - Plan repas : choisir N recettes compatibles.
 - Liste consolidée : fusionner les ingrédients nécessaires.
-- Stock local : soustraire ce qui est déjà dans le placard (`pantry.yaml`).
+- Stock local : soustraire, consommer et surveiller ce qui est déjà dans le placard (`pantry.yaml`).
 - Comparaison panier : comparer des prix fournis en YAML/JSON, en mode `simple`, `economic` ou `hybrid`.
 
 ## Installation dev
@@ -28,14 +28,33 @@ panier profile init
 panier profile dislike add oignons
 panier profile allergy add arachides
 panier pantry init
-panier pantry add riz --quantity 150 --unit g
+panier pantry add riz --quantity 150 --unit g --min 300g
 panier pantry list
+panier pantry need examples/chili.yaml
+panier pantry consume examples/chili.yaml
+panier shopping from-recipe examples/chili.yaml
 cp examples/recipes.yaml ~/.panier/recipes.yaml
 panier recipe suggest --meals 3
 panier plan --meals 3
 panier plan --meals 2 --prices examples/prices.yaml --max-stores 2
 panier compare examples/shopping-list.yaml --prices examples/prices.yaml --max-stores 2
 ```
+
+### Stock / pantry
+
+Commandes dédiées :
+
+```bash
+panier pantry init
+panier pantry add riz --quantity 500 --unit g --min 300g
+panier pantry need examples/chili.yaml      # affiche ce qu’il manque pour la recette
+panier pantry consume examples/chili.yaml   # décrémente le stock, signale les manques
+panier shopping from-recipe examples/chili.yaml
+```
+
+Les unités compatibles sont normalisées pour les bases courantes : `g/kg` et `ml/cl/l`.
+Les unités métier (`boîte`, `pièce`, etc.) restent comparées telles quelles.
+Les seuils `--min` déclenchent une alerte de réachat quand le stock passe dessous.
 
 ## Philosophie
 

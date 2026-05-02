@@ -25,6 +25,19 @@ class BasketRecommendation:
     reason: str
 
 
+_UNIT_FACTORS: dict[str, tuple[str, float]] = {
+    "g": ("g", 1.0),
+    "gramme": ("g", 1.0),
+    "grammes": ("g", 1.0),
+    "kg": ("g", 1000.0),
+    "ml": ("ml", 1.0),
+    "cl": ("ml", 10.0),
+    "l": ("ml", 1000.0),
+    "litre": ("ml", 1000.0),
+    "litres": ("ml", 1000.0),
+}
+
+
 def compatible_recipes(recipes: list[Recipe], profile: FoodProfile) -> list[Recipe]:
     return [recipe for recipe in recipes if not recipe.conflicts(profile)]
 
@@ -40,42 +53,145 @@ def consolidate_ingredients(recipes: list[Recipe]) -> list[ShoppingItem]:
 
     for recipe in recipes:
         for ingredient in recipe.ingredients:
-            key = (normalize_name(ingredient.name), ingredient.unit)
+            key = _quantity_key(ingredient.name, ingredient.unit)
             if ingredient.quantity is None:
                 quantities[key] += 1
             else:
-                quantities[key] += float(ingredient.quantity)
+                quantities[key] += _to_base_quantity(float(ingredient.quantity), ingredient.unit)
                 has_quantity[key] = True
 
     return _items_from_quantities(quantities, has_quantity)
 
 
 def subtract_pantry(items: list[ShoppingItem], pantry: Pantry) -> list[ShoppingItem]:
-    pantry_quantities: dict[tuple[str, str | None], float] = defaultdict(float)
-    pantry_unknown_quantity: set[tuple[str, str | None]] = set()
-
-    for item in pantry.items:
-        key = (normalize_name(item.name), item.unit)
-        if item.quantity is None:
-            pantry_unknown_quantity.add(key)
-        else:
-            pantry_quantities[key] += float(item.quantity)
+    pantry_quantities, pantry_unknown_quantity = _index_pantry(pantry)
 
     remaining: list[ShoppingItem] = []
     for item in items:
-        key = (normalize_name(item.name), item.unit)
+        key = _quantity_key(item.name, item.unit)
         if item.quantity is None:
             if key not in pantry_unknown_quantity and pantry_quantities[key] <= 0:
                 remaining.append(item)
             continue
 
-        missing_quantity = float(item.quantity) - pantry_quantities[key]
+        missing_quantity = (
+            _to_base_quantity(float(item.quantity), item.unit) - pantry_quantities[key]
+        )
         if missing_quantity > 0:
-            remaining.append(
-                ShoppingItem(name=item.name, quantity=missing_quantity, unit=item.unit)
-            )
+            remaining.append(_item_from_base(item.name, missing_quantity, key[1]))
 
     return remaining
+
+
+def consume_pantry(items: list[ShoppingItem], pantry: Pantry) -> tuple[Pantry, list[ShoppingItem]]:
+    """Consume requested items from pantry and return updated pantry + missing items.
+
+    Consumption is safe/partial: available stock is decremented, and shortages are returned
+    instead of silently going negative.
+    """
+    remaining_to_consume: dict[tuple[str, str | None], float | None] = {}
+    display_names: dict[tuple[str, str | None], str] = {}
+    for item in items:
+        key = _quantity_key(item.name, item.unit)
+        display_names[key] = item.name
+        if item.quantity is None:
+            remaining_to_consume[key] = None
+        else:
+            remaining_to_consume[key] = (remaining_to_consume.get(key) or 0.0) + _to_base_quantity(
+                float(item.quantity), item.unit
+            )
+
+    updated_items: list[ShoppingItem] = []
+    for pantry_item in pantry.items:
+        key = _quantity_key(pantry_item.name, pantry_item.unit)
+        requested = remaining_to_consume.get(key)
+        if requested is None and key in remaining_to_consume:
+            remaining_to_consume[key] = 0.0
+            continue
+        if requested is None:
+            updated_items.append(pantry_item)
+            continue
+        if pantry_item.quantity is None:
+            remaining_to_consume[key] = 0.0
+            continue
+
+        available = _to_base_quantity(float(pantry_item.quantity), pantry_item.unit)
+        consumed = min(available, requested)
+        left = available - consumed
+        remaining_to_consume[key] = requested - consumed
+        if left > 0:
+            updated_items.append(
+                ShoppingItem(
+                    name=pantry_item.name,
+                    quantity=left,
+                    unit=key[1],
+                    min_quantity=pantry_item.min_quantity,
+                    min_unit=pantry_item.min_unit,
+                )
+            )
+
+    missing = [
+        _item_from_base(display_names.get(key, key[0]), quantity, key[1])
+        for key, quantity in remaining_to_consume.items()
+        if quantity not in (None, 0.0) and quantity > 0
+    ]
+    return Pantry(
+        items=sorted(updated_items, key=lambda item: (item.name, item.unit or ""))
+    ), missing
+
+
+def low_stock_items(pantry: Pantry) -> list[ShoppingItem]:
+    low: list[ShoppingItem] = []
+    for item in pantry.items:
+        if item.quantity is None or item.min_quantity is None:
+            continue
+        quantity = _to_base_quantity(float(item.quantity), item.unit)
+        minimum = _to_base_quantity(float(item.min_quantity), item.min_unit or item.unit)
+        if quantity < minimum:
+            low.append(
+                ShoppingItem(
+                    name=item.name,
+                    quantity=minimum - quantity,
+                    unit=_canonical_unit(item.min_unit or item.unit),
+                )
+            )
+    return low
+
+
+def _index_pantry(
+    pantry: Pantry,
+) -> tuple[dict[tuple[str, str | None], float], set[tuple[str, str | None]]]:
+    pantry_quantities: dict[tuple[str, str | None], float] = defaultdict(float)
+    pantry_unknown_quantity: set[tuple[str, str | None]] = set()
+
+    for item in pantry.items:
+        key = _quantity_key(item.name, item.unit)
+        if item.quantity is None:
+            pantry_unknown_quantity.add(key)
+        else:
+            pantry_quantities[key] += _to_base_quantity(float(item.quantity), item.unit)
+    return pantry_quantities, pantry_unknown_quantity
+
+
+def _quantity_key(name: str, unit: str | None) -> tuple[str, str | None]:
+    return normalize_name(name), _canonical_unit(unit)
+
+
+def _canonical_unit(unit: str | None) -> str | None:
+    if unit is None:
+        return None
+    normalized = normalize_name(unit)
+    return _UNIT_FACTORS.get(normalized, (normalized, 1.0))[0]
+
+
+def _to_base_quantity(quantity: float, unit: str | None) -> float:
+    if unit is None:
+        return quantity
+    return quantity * _UNIT_FACTORS.get(normalize_name(unit), (unit, 1.0))[1]
+
+
+def _item_from_base(name: str, quantity: float, canonical_unit: str | None) -> ShoppingItem:
+    return ShoppingItem(name=name, quantity=quantity, unit=canonical_unit)
 
 
 def _items_from_quantities(

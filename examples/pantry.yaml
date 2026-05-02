@@ -2,4 +2,6 @@ items:
   - name: riz
     quantity: 150
     unit: g
+    min_quantity: 300
+    min_unit: g
   - name: sel

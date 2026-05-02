@@ -1,0 +1,13 @@
+name: Chili sin carne
+servings: 2
+tags: [budget, vegetarien]
+ingredients:
+  - name: riz
+    quantity: 300
+    unit: g
+  - name: haricots rouges
+    quantity: 1
+    unit: boîte
+  - name: tomates concassées
+    quantity: 1
+    unit: boîte

@@ -20,6 +20,8 @@ from panier.models import (
 )
 from panier.planner import (
     consolidate_ingredients,
+    consume_pantry,
+    low_stock_items,
     recommend_basket,
     select_meals,
     subtract_pantry,
@@ -32,9 +34,11 @@ app = typer.Typer(
 profile_app = typer.Typer(help="Gérer le profil alimentaire.")
 recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
 pantry_app = typer.Typer(help="Gérer le stock local.")
+shopping_app = typer.Typer(help="Générer des listes de courses.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
+app.add_typer(shopping_app, name="shopping")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -63,8 +67,7 @@ def load_recipes(data_dir: Path) -> list[Recipe]:
     if not path.exists():
         raise typer.BadParameter(f"Fichier recettes absent : {path}")
     return [
-        Recipe.model_validate(item)
-        for item in yaml.safe_load(path.read_text(encoding="utf-8"))
+        Recipe.model_validate(item) for item in yaml.safe_load(path.read_text(encoding="utf-8"))
     ]
 
 
@@ -89,6 +92,39 @@ def save_pantry(data_dir: Path, pantry: Pantry) -> None:
 def load_offers(prices: Path) -> list[StoreOffer]:
     price_data = yaml.safe_load(prices.read_text(encoding="utf-8")) or {}
     return [StoreOffer.model_validate(offer) for offer in price_data.get("offers", [])]
+
+
+def parse_quantity_unit(value: str) -> tuple[float, str | None]:
+    text = value.strip()
+    number = ""
+    unit = ""
+    for char in text:
+        if char.isdigit() or char in ".,":
+            if unit:
+                raise typer.BadParameter(f"Quantité invalide : {value}")
+            number += char.replace(",", ".")
+        else:
+            unit += char
+    if not number:
+        raise typer.BadParameter(f"Quantité invalide : {value}")
+    return float(number), unit.strip() or None
+
+
+def load_recipe_file(path: Path) -> Recipe:
+    return Recipe.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
+def recipe_items(recipe: Recipe) -> list[ShoppingItem]:
+    return consolidate_ingredients([recipe])
+
+
+def echo_items(title: str, items: list[ShoppingItem]) -> None:
+    typer.echo(title)
+    if not items:
+        typer.echo("- rien")
+        return
+    for item in items:
+        typer.echo(f"- {format_item(item)}")
 
 
 def format_item(item: ShoppingItem) -> str:
@@ -232,7 +268,14 @@ def pantry_list(
         typer.echo("Stock vide")
         return
     for item in pantry.items:
-        typer.echo(f"- {format_item(item)}")
+        line = f"- {format_item(item)}"
+        if item.min_quantity is not None:
+            min_unit = item.min_unit or item.unit or ""
+            line += f" (min {item.min_quantity:g}{(' ' + min_unit) if min_unit else ''})"
+        typer.echo(line)
+    low = low_stock_items(pantry)
+    if low:
+        echo_items("\nAlerte réachat:", low)
 
 
 @pantry_app.command("add")
@@ -240,10 +283,19 @@ def pantry_add(
     name: Annotated[str, typer.Argument()],
     quantity: Annotated[float | None, typer.Option("--quantity", "-q", min=0)] = None,
     unit: Annotated[str | None, typer.Option("--unit", "-u")] = None,
+    minimum: Annotated[
+        str | None, typer.Option("--min", help="Seuil de réachat, ex: 300g ou 1kg")
+    ] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
     pantry = load_pantry(data_dir)
-    item = ShoppingItem(name=name, quantity=quantity, unit=unit)
+    min_quantity = None
+    min_unit = None
+    if minimum is not None:
+        min_quantity, min_unit = parse_quantity_unit(minimum)
+    item = ShoppingItem(
+        name=name, quantity=quantity, unit=unit, min_quantity=min_quantity, min_unit=min_unit
+    )
     matched = False
     for existing in pantry.items:
         if existing.name == item.name and existing.unit == item.unit:
@@ -252,6 +304,9 @@ def pantry_add(
                 existing.quantity = item.quantity
             else:
                 existing.quantity += item.quantity
+            if min_quantity is not None:
+                existing.min_quantity = min_quantity
+                existing.min_unit = min_unit or unit
             break
     if not matched:
         pantry.items.append(item)
@@ -287,6 +342,56 @@ def pantry_remove(
         typer.echo(f"Stock retiré : {format_item(item)}")
     else:
         typer.echo(f"Stock introuvable : {format_item(item)}")
+
+
+@pantry_app.command("need")
+def pantry_need(
+    recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    missing = subtract_pantry(recipe_items(load_recipe_file(recipe)), load_pantry(data_dir))
+    echo_items("Manquant:", missing)
+
+
+@pantry_app.command("consume")
+def pantry_consume(
+    recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    requested = recipe_items(load_recipe_file(recipe))
+    updated, missing = consume_pantry(requested, load_pantry(data_dir))
+    save_pantry(data_dir, updated)
+    consumed = subtract_pantry(requested, Pantry(items=missing))
+    echo_items("Consommé:", consumed)
+    if missing:
+        echo_items("\nManquant:", missing)
+    low = low_stock_items(updated)
+    if low:
+        echo_items("\nAlerte réachat:", low)
+
+
+@shopping_app.command("from-recipe")
+def shopping_from_recipe(
+    recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
+    max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
+) -> None:
+    items = subtract_pantry(recipe_items(load_recipe_file(recipe)), load_pantry(data_dir))
+    echo_items("Liste à acheter:", items)
+    if prices is None or not items:
+        return
+    recommendation = recommend_basket(items, load_offers(prices), mode=mode, max_stores=max_stores)
+    echo_recommendation(
+        items=items,
+        recommendation_items=recommendation.by_item,
+        mode=recommendation.mode,
+        stores=recommendation.stores,
+        total=recommendation.total,
+        savings_vs_best_single=recommendation.savings_vs_best_single,
+        reason=recommendation.reason,
+    )
 
 
 @recipe_app.command("suggest")

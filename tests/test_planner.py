@@ -227,3 +227,112 @@ def test_pantry_cli_add_list_and_remove(tmp_path: Path) -> None:
     assert "- riz 300 g" in list_result.output
     assert remove_result.exit_code == 0
     assert "- riz 150 g" in list_after_remove.output
+
+
+def test_subtract_pantry_converts_kg_to_g() -> None:
+    items = [ShoppingItem(name="riz", quantity=750, unit="g")]
+    pantry = Pantry(items=[ShoppingItem(name="riz", quantity=0.5, unit="kg")])
+
+    assert subtract_pantry(items, pantry) == [ShoppingItem(name="riz", quantity=250, unit="g")]
+
+
+def test_pantry_need_consume_and_low_stock_cli(tmp_path: Path) -> None:
+    runner = CliRunner()
+    recipe = tmp_path / "recette.yaml"
+    recipe.write_text(
+        """
+name: Chili test
+ingredients:
+  - name: riz
+    quantity: 300
+    unit: g
+  - name: tomates
+    quantity: 2
+    unit: boîte
+""",
+        encoding="utf-8",
+    )
+
+    runner.invoke(app, ["pantry", "init", "--data-dir", str(tmp_path)])
+    runner.invoke(
+        app,
+        [
+            "pantry",
+            "add",
+            "riz",
+            "--quantity",
+            "500",
+            "--unit",
+            "g",
+            "--min",
+            "300g",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "pantry",
+            "add",
+            "tomates",
+            "--quantity",
+            "1",
+            "--unit",
+            "boîte",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    need_result = runner.invoke(app, ["pantry", "need", str(recipe), "--data-dir", str(tmp_path)])
+    consume_result = runner.invoke(
+        app, ["pantry", "consume", str(recipe), "--data-dir", str(tmp_path)]
+    )
+    list_result = runner.invoke(app, ["pantry", "list", "--data-dir", str(tmp_path)])
+
+    assert need_result.exit_code == 0
+    assert "Manquant:" in need_result.output
+    assert "- tomates 1 boîte" in need_result.output
+    assert consume_result.exit_code == 0
+    assert "Consommé:" in consume_result.output
+    assert "Manquant:" in consume_result.output
+    assert "Alerte réachat:" in consume_result.output
+    assert "- riz 100 g" in consume_result.output
+    assert "- riz 200 g" in list_result.output
+
+
+def test_shopping_from_recipe_outputs_missing_items(tmp_path: Path) -> None:
+    runner = CliRunner()
+    recipe = tmp_path / "recette.yaml"
+    recipe.write_text(
+        """
+name: Pâtes test
+ingredients:
+  - name: pâtes
+    quantity: 250
+    unit: g
+  - name: thon
+    quantity: 1
+    unit: boîte
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pantry.yaml").write_text(
+        """
+items:
+  - name: pâtes
+    quantity: 100
+    unit: g
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app, ["shopping", "from-recipe", str(recipe), "--data-dir", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "Liste à acheter:" in result.output
+    assert "- pâtes 150 g" in result.output
+    assert "- thon 1 boîte" in result.output
