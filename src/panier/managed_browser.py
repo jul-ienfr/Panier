@@ -101,7 +101,7 @@ class ManagedBrowserClient:
                 "Configure PANIER_MANAGED_BROWSER_COMMAND."
             ) from exc
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
+            detail = self._error_detail(completed)
             raise ManagedBrowserError(
                 f"Managed Browser a échoué ({completed.returncode}): {detail}"
             )
@@ -110,3 +110,18 @@ class ManagedBrowserClient:
         except json.JSONDecodeError as exc:
             raise ManagedBrowserError("Réponse Managed Browser invalide (JSON attendu).") from exc
         return BrowserCommandResult(action=args[0], data=payload)
+
+    @staticmethod
+    def _error_detail(completed: subprocess.CompletedProcess[str]) -> str:
+        """Retourne le détail le plus utile d'un échec Managed Browser."""
+        raw = (completed.stderr or completed.stdout or "").strip()
+        if not raw:
+            return "erreur inconnue"
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(payload, dict):
+            return raw
+        parts = [str(payload[key]) for key in ("error", "operation", "profile") if payload.get(key)]
+        return " — ".join(parts) or raw

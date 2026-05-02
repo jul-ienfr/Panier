@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Annotated
 
@@ -8,6 +9,7 @@ import typer
 import yaml
 
 from panier import __version__
+from panier.catalog import ProductCatalog, load_catalog
 from panier.deterministic import NO_LLM_ENV_VAR, explain_item, no_llm_status
 from panier.drive import (
     best_offer_for_item,
@@ -200,19 +202,43 @@ def collect_offers_for_drives(
     profile: str,
     browser_command: str | None,
     max_results: int,
+    catalog: ProductCatalog | None = None,
 ) -> list[StoreOffer]:
     offers: list[StoreOffer] = []
     for drive in drives:
         resolved_profile = managed_browser_profile_for_drive(profile, drive)
         browser = ManagedBrowserClient(command=browser_command, profile=resolved_profile, site=drive)
         try:
-            collected = collect_drive_offers(items, drive, browser, max_results=max_results)
+            collected = _collect_drive_offers_with_optional_catalog(
+                items, drive, browser, max_results=max_results, catalog=catalog
+            )
         except ManagedBrowserError as exc:
-            typer.echo(f"Erreur Managed Browser {drive}: {exc}", err=True)
-            raise typer.Exit(1) from exc
+            typer.echo(
+                f"Avertissement Managed Browser {drive}: {exc}; collecte ignorée pour ce drive.",
+                err=True,
+            )
+            continue
         typer.echo(f"Collecte {drive}: {len(collected)} offres")
         offers.extend(collected)
     return offers
+
+
+def _collect_drive_offers_with_optional_catalog(
+    items: list[ShoppingItem],
+    drive: str,
+    browser: ManagedBrowserClient,
+    *,
+    max_results: int,
+    catalog: ProductCatalog | None,
+) -> list[StoreOffer]:
+    # Tests and callers may monkeypatch collect_drive_offers with the historical
+    # signature. Keep that backward-compatible while passing catalog to the real
+    # implementation when supported.
+    if "catalog" in inspect.signature(collect_drive_offers).parameters:
+        return collect_drive_offers(
+            items, drive, browser, max_results=max_results, catalog=catalog
+        )
+    return collect_drive_offers(items, drive, browser, max_results=max_results)
 
 
 def parse_recipe_ingredient(value: str) -> Ingredient:
@@ -692,12 +718,16 @@ def shopping_from_recipe(
 def drive_plan(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
     drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Répertoire données Panier")
+    ] = DEFAULT_DATA_DIR,
 ) -> None:
     data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    catalog = load_catalog(data_dir)
     echo_items("Liste drive:", items)
     typer.echo("\nRecherches à lancer:")
-    for entry in build_drive_search_plan(items, drive):
+    for entry in build_drive_search_plan(items, drive, catalog=catalog):
         typer.echo(f"- {format_item(entry.item)} -> {entry.query} ({entry.confidence})")
 
 
@@ -711,16 +741,20 @@ def drive_open(
         str | None,
         typer.Option("--browser-command", help="Commande wrapper Managed Browser"),
     ] = None,
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Répertoire données Panier")
+    ] = DEFAULT_DATA_DIR,
 ) -> None:
     data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
         command=browser_command,
         profile=profile,
         site=site or drive,
     )
     try:
-        results = open_drive_searches(items, drive, browser)
+        results = open_drive_searches(items, drive, browser, catalog=catalog)
     except ManagedBrowserError as exc:
         typer.echo(f"Erreur Managed Browser: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -769,17 +803,23 @@ def drive_collect(
     ] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Répertoire données Panier")
+    ] = DEFAULT_DATA_DIR,
 ) -> None:
     data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
     items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
     resolved_profile = managed_browser_profile_for_drive(profile, site or drive)
+    catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
         command=browser_command,
         profile=resolved_profile,
         site=site or drive,
     )
     try:
-        offers = collect_drive_offers(items, drive, browser, max_results=max_results)
+        offers = _collect_drive_offers_with_optional_catalog(
+            items, drive, browser, max_results=max_results, catalog=catalog
+        )
     except ManagedBrowserError as exc:
         typer.echo(f"Erreur Managed Browser: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -1077,6 +1117,7 @@ def plan(
             profile=profile,
             browser_command=browser_command,
             max_results=max_results,
+            catalog=load_catalog(data_dir),
         )
         if collect_output is not None:
             collect_output.parent.mkdir(parents=True, exist_ok=True)
@@ -1175,7 +1216,12 @@ def week(
     if collect:
         drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
         offers = collect_offers_for_drives(
-            items, drives, profile=profile, browser_command=browser_command, max_results=max_results
+            items,
+            drives,
+            profile=profile,
+            browser_command=browser_command,
+            max_results=max_results,
+            catalog=load_catalog(data_dir),
         )
         if collect_output is not None:
             collect_output.parent.mkdir(parents=True, exist_ok=True)
