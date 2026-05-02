@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
 from typer.testing import CliRunner
 
 from panier.cli import app
@@ -11,6 +12,7 @@ from panier.drive import (
     best_offer_for_item,
     build_drive_search_plan,
     build_drive_search_query,
+    collect_drive_offers,
     drive_search_url,
     open_drive_searches,
 )
@@ -582,3 +584,153 @@ def test_drive_cli_open_reports_managed_browser_error(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Erreur Managed Browser:" in result.output
+
+
+def test_drive_search_url_supports_auchan() -> None:
+    assert drive_search_url("auchan", "lait demi écrémé") == (
+        "https://www.auchan.fr/recherche?text=lait+demi+%C3%A9cr%C3%A9m%C3%A9"
+    )
+
+
+def test_managed_browser_client_passes_tab_id_to_console_eval() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps({"items": []})
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="auchan", runner=fake_runner
+    )
+
+    result = client.console_eval("1 + 1", tab_id="tab-42")
+
+    assert result.action == "console"
+    assert calls == [
+        [
+            "managed-browser",
+            "console",
+            "eval",
+            "--expression",
+            "1 + 1",
+            "--tab-id",
+            "tab-42",
+            "--profile",
+            "courses",
+            "--site",
+            "auchan",
+            "--json",
+        ]
+    ]
+
+
+def test_collect_drive_offers_extracts_normalized_prices_from_browser_page() -> None:
+    calls: list[list[str]] = []
+    payloads = [
+        {"tabId": "tab-riz"},
+        {
+            "items": [
+                {
+                    "title": "Riz basmati 1kg",
+                    "price": "2,49 €",
+                    "unitPrice": "2,49 €/kg",
+                    "url": "/p/riz-basmati",
+                },
+                {
+                    "title": "Céréales riz soufflé",
+                    "price": "1,20 €",
+                    "unitPrice": "6,00 €/kg",
+                    "url": "https://example.test/cereales",
+                },
+            ]
+        },
+    ]
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps(payloads.pop(0))
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="auchan", runner=fake_runner
+    )
+
+    offers = collect_drive_offers([ShoppingItem(name="riz")], "auchan", client, max_results=1)
+
+    assert [offer.product for offer in offers] == ["Riz basmati 1kg"]
+    assert offers[0].store == "auchan"
+    assert offers[0].item == "riz"
+    assert offers[0].price == 2.49
+    assert offers[0].unit_price == 2.49
+    assert offers[0].confidence == "exact"
+    assert offers[0].url == "https://www.auchan.fr/p/riz-basmati"
+    assert calls[0][:3] == ["managed-browser", "navigate", "--url"]
+    assert calls[1][:4] == ["managed-browser", "console", "eval", "--expression"]
+    assert "--tab-id" in calls[1]
+    assert calls[1][calls[1].index("--tab-id") + 1] == "tab-riz"
+
+
+def test_drive_cli_collect_writes_offers_yaml(tmp_path: Path) -> None:
+    shopping = tmp_path / "shopping.yaml"
+    shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
+    output = tmp_path / "offers.yaml"
+    recorder = tmp_path / "fake_browser.py"
+    recorder.write_text(
+        """
+import json
+import sys
+if sys.argv[1:3] == ['navigate', '--url']:
+    print(json.dumps({'tabId': 'tab-riz'}))
+elif sys.argv[1:3] == ['console', 'eval']:
+    print(json.dumps({
+        'items': [{
+            'title': 'Riz basmati 1kg',
+            'price': '2,49 €',
+            'unitPrice': '2,49 €/kg',
+            'url': '/p/riz',
+        }]
+    }))
+else:
+    print(json.dumps({}))
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "drive",
+            "collect",
+            str(shopping),
+            "--drive",
+            "auchan",
+            "--browser-command",
+            f"python {recorder}",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Offres collectées: 1" in result.output
+    data = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert data == {
+        "offers": [
+            {
+                "store": "auchan",
+                "item": "riz",
+                "product": "Riz basmati 1kg",
+                "price": 2.49,
+                "unit_price": 2.49,
+                "confidence": "exact",
+                "url": "https://www.auchan.fr/p/riz",
+            }
+        ]
+    }

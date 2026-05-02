@@ -71,6 +71,12 @@ class ManagedBrowserClient:
     def navigate(self, url: str) -> BrowserCommandResult:
         return self._run(["navigate", "--url", url])
 
+    def console_eval(self, expression: str, tab_id: str | None = None) -> BrowserCommandResult:
+        args = ["console", "eval", "--expression", expression]
+        if tab_id:
+            args.extend(["--tab-id", tab_id])
+        return self._run(args)
+
     def snapshot(self) -> BrowserCommandResult:
         return self._run(["snapshot"])
 

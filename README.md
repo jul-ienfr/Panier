@@ -34,7 +34,8 @@ panier pantry need examples/chili.yaml
 panier pantry consume examples/chili.yaml
 panier shopping from-recipe examples/chili.yaml
 panier drive plan examples/shopping-list.yaml --drive leclerc
-panier drive open examples/shopping-list.yaml --drive leclerc --profile panier
+panier drive open examples/shopping-list.yaml --drive leclerc --profile courses
+panier drive collect examples/shopping-list.yaml --drive auchan --output offers.yaml
 panier drive pick examples/shopping-list.yaml examples/prices.yaml
 cp examples/recipes.yaml ~/.panier/recipes.yaml
 panier recipe suggest --meals 3

@@ -7,7 +7,12 @@ import typer
 import yaml
 
 from panier import __version__
-from panier.drive import best_offer_for_item, build_drive_search_plan, open_drive_searches
+from panier.drive import (
+    best_offer_for_item,
+    build_drive_search_plan,
+    collect_drive_offers,
+    open_drive_searches,
+)
 from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
@@ -462,6 +467,43 @@ def drive_pick(
             f"- {format_item(item)}: {chosen.offer.product} — {chosen.offer.store} — "
             f"{chosen.offer.price:.2f} € (score {chosen.score:.2f}; {chosen.reason})"
         )
+
+
+@drive_app.command("collect")
+def drive_collect(
+    shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [...]")],
+    drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
+    profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
+    site: Annotated[str | None, typer.Option("--site", help="Site Managed Browser")] = None,
+    browser_command: Annotated[
+        str | None,
+        typer.Option("--browser-command", help="Commande wrapper Managed Browser"),
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
+) -> None:
+    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
+    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=profile,
+        site=site or drive,
+    )
+    try:
+        offers = collect_drive_offers(items, drive, browser, max_results=max_results)
+    except ManagedBrowserError as exc:
+        typer.echo(f"Erreur Managed Browser: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    payload = {"offers": [offer.model_dump(mode="json") for offer in offers]}
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
+        typer.echo(f"Offres collectées: {len(offers)} -> {output}")
+    else:
+        typer.echo(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
 
 @recipe_app.command("suggest")
