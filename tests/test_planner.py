@@ -840,6 +840,70 @@ def test_plan_collects_multiple_drives_and_recommends(monkeypatch, tmp_path: Pat
     assert "6.99 €/kg" in result.output
 
 
+def test_plan_collect_continues_when_one_drive_fails(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "catalog.yaml").write_text("products: []\n", encoding="utf-8")
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: Riz rapide
+  tags: [budget]
+  ingredients:
+    - name: riz
+      quantity: 100
+      unit: g
+""".strip(),
+        encoding="utf-8",
+    )
+
+    def fake_collect(items, drive, browser, products=None, max_results=5):
+        if drive == "auchan":
+            raise ManagedBrowserError("Internal server error — navigate — courses-auchan")
+        return [StoreOffer(store=drive, item="riz", product="Riz Leclerc", price=2.0)]
+
+    monkeypatch.setattr(cli, "collect_drive_offers", fake_collect)
+    output = tmp_path / "offers.yaml"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "plan",
+            "--data-dir",
+            str(tmp_path),
+            "--meals",
+            "1",
+            "--collect",
+            "leclerc,auchan",
+            "--collect-output",
+            str(output),
+            "--no-pantry",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Collecte leclerc: 1 offres" in result.output
+    assert "Avertissement Managed Browser auchan:" in result.output
+    assert output.exists()
+    assert "Riz Leclerc" in output.read_text(encoding="utf-8")
+
+
+def test_managed_browser_error_detail_prefers_json_error_fields() -> None:
+    completed = subprocess.CompletedProcess(
+        args=["managed-browser"],
+        returncode=1,
+        stdout=json.dumps(
+            {
+                "error": "Internal server error",
+                "operation": "navigate",
+                "profile": "courses-auchan",
+            }
+        ),
+        stderr="",
+    )
+
+    assert ManagedBrowserClient._error_detail(completed) == (
+        "Internal server error — navigate — courses-auchan"
+    )
+
+
 def test_build_drive_search_query_handles_store_brands() -> None:
     item = ShoppingItem(name="cola")
     product = DriveProduct(
