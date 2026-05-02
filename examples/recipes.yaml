@@ -322,3 +322,307 @@
     - name: oignons
       quantity: 1
       unit: pièce
+
+- name: Wrap poulet crudités yaourt
+  servings: 2
+  prep_minutes: 15
+  cost_level: moyen
+  tags: [rapide, equilibre, froid]
+  ingredients:
+    - name: tortillas
+      quantity: 4
+      unit: pièce
+    - name: poulet
+      quantity: 250
+      unit: g
+    - name: salade
+      quantity: 1
+      unit: pièce
+    - name: tomates
+      quantity: 2
+      unit: pièce
+    - name: yaourt nature
+      quantity: 1
+      unit: pièce
+- name: Semoule sardines tomates concombre
+  servings: 2
+  prep_minutes: 12
+  cost_level: budget
+  tags: [rapide, budget, equilibre, froid]
+  ingredients:
+    - name: semoule
+      quantity: 180
+      unit: g
+    - name: sardines
+      quantity: 1
+      unit: boîte
+    - name: tomates
+      quantity: 2
+      unit: pièce
+    - name: concombre
+      quantity: 1
+      unit: pièce
+- name: Poêlée riz oeufs petits pois
+  servings: 2
+  prep_minutes: 18
+  cost_level: budget
+  tags: [rapide, budget, vegetarien, equilibre]
+  ingredients:
+    - name: riz
+      quantity: 220
+      unit: g
+    - name: œufs
+      quantity: 4
+      unit: pièce
+    - name: petits pois
+      quantity: 300
+      unit: g
+    - name: oignons
+      quantity: 1
+      unit: pièce
+- name: Tortilla pommes de terre salade
+  servings: 3
+  prep_minutes: 30
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
+  ingredients:
+    - name: pommes de terre
+      quantity: 600
+      unit: g
+    - name: œufs
+      quantity: 6
+      unit: pièce
+    - name: oignons
+      quantity: 1
+      unit: pièce
+    - name: salade
+      quantity: 1
+      unit: pièce
+- name: Couscous express pois chiches légumes
+  servings: 3
+  prep_minutes: 20
+  cost_level: budget
+  tags: [rapide, budget, vegetarien, equilibre]
+  ingredients:
+    - name: semoule
+      quantity: 240
+      unit: g
+    - name: pois chiches
+      quantity: 1
+      unit: boîte
+    - name: carottes
+      quantity: 3
+      unit: pièce
+    - name: courgettes
+      quantity: 2
+      unit: pièce
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+- name: Pâtes poulet épinards crème légère
+  servings: 3
+  prep_minutes: 22
+  cost_level: moyen
+  tags: [rapide, equilibre, enfants]
+  ingredients:
+    - name: pâtes
+      quantity: 300
+      unit: g
+    - name: poulet
+      quantity: 300
+      unit: g
+    - name: épinards
+      quantity: 300
+      unit: g
+    - name: crème légère
+      quantity: 20
+      unit: cl
+- name: Riz thon maïs haricots rouges
+  servings: 2
+  prep_minutes: 15
+  cost_level: budget
+  tags: [rapide, budget, equilibre, froid]
+  ingredients:
+    - name: riz
+      quantity: 200
+      unit: g
+    - name: thon
+      quantity: 1
+      unit: boîte
+    - name: maïs
+      quantity: 1
+      unit: boîte
+    - name: haricots rouges
+      quantity: 1
+      unit: boîte
+- name: Curry pois chiches patate douce
+  servings: 3
+  prep_minutes: 30
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
+  ingredients:
+    - name: riz
+      quantity: 240
+      unit: g
+    - name: pois chiches
+      quantity: 1
+      unit: boîte
+    - name: patate douce
+      quantity: 500
+      unit: g
+    - name: lait de coco
+      quantity: 20
+      unit: cl
+    - name: épinards
+      quantity: 300
+      unit: g
+- name: Boulgour dinde courgettes tomates
+  servings: 2
+  prep_minutes: 24
+  cost_level: moyen
+  tags: [rapide, equilibre]
+  ingredients:
+    - name: boulgour
+      quantity: 180
+      unit: g
+    - name: dinde
+      quantity: 250
+      unit: g
+    - name: courgettes
+      quantity: 2
+      unit: pièce
+    - name: tomates concassées
+      quantity: 1
+      unit: boîte
+- name: Galettes lentilles carottes salade
+  servings: 3
+  prep_minutes: 35
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, batch]
+  ingredients:
+    - name: lentilles
+      quantity: 250
+      unit: g
+    - name: carottes
+      quantity: 3
+      unit: pièce
+    - name: œufs
+      quantity: 2
+      unit: pièce
+    - name: salade
+      quantity: 1
+      unit: pièce
+- name: One pot riz saumon brocoli
+  servings: 2
+  prep_minutes: 25
+  cost_level: moyen
+  tags: [rapide, equilibre, une-casserole]
+  ingredients:
+    - name: riz
+      quantity: 200
+      unit: g
+    - name: saumon
+      quantity: 250
+      unit: g
+    - name: brocoli
+      quantity: 1
+      unit: pièce
+    - name: carottes
+      quantity: 2
+      unit: pièce
+- name: Salade quinoa oeufs feta
+  servings: 2
+  prep_minutes: 20
+  cost_level: moyen
+  tags: [rapide, vegetarien, equilibre, froid]
+  ingredients:
+    - name: quinoa
+      quantity: 180
+      unit: g
+    - name: œufs
+      quantity: 4
+      unit: pièce
+    - name: feta
+      quantity: 120
+      unit: g
+    - name: tomates
+      quantity: 2
+      unit: pièce
+    - name: concombre
+      quantity: 1
+      unit: pièce
+- name: Gratin riz courgettes jambon
+  servings: 4
+  prep_minutes: 35
+  cost_level: budget
+  tags: [budget, enfants, batch]
+  ingredients:
+    - name: riz
+      quantity: 300
+      unit: g
+    - name: courgettes
+      quantity: 3
+      unit: pièce
+    - name: jambon
+      quantity: 4
+      unit: tranche
+    - name: emmental râpé
+      quantity: 150
+      unit: g
+- name: Soupe pois cassés carottes jambon
+  servings: 4
+  prep_minutes: 40
+  cost_level: budget
+  tags: [budget, equilibre, batch]
+  ingredients:
+    - name: pois cassés
+      quantity: 300
+      unit: g
+    - name: carottes
+      quantity: 4
+      unit: pièce
+    - name: pommes de terre
+      quantity: 400
+      unit: g
+    - name: jambon
+      quantity: 2
+      unit: tranche
+- name: Nouilles tofu légumes sauce soja
+  servings: 2
+  prep_minutes: 18
+  cost_level: moyen
+  tags: [rapide, vegetarien, equilibre]
+  ingredients:
+    - name: nouilles
+      quantity: 200
+      unit: g
+    - name: tofu
+      quantity: 200
+      unit: g
+    - name: carottes
+      quantity: 2
+      unit: pièce
+    - name: brocoli
+      quantity: 1
+      unit: pièce
+    - name: sauce soja
+      quantity: 5
+      unit: cl
+- name: Pommes de terre oeufs haricots verts
+  servings: 2
+  prep_minutes: 25
+  cost_level: budget
+  tags: [budget, vegetarien, equilibre, froid]
+  ingredients:
+    - name: pommes de terre
+      quantity: 500
+      unit: g
+    - name: œufs
+      quantity: 4
+      unit: pièce
+    - name: haricots verts
+      quantity: 400
+      unit: g
+    - name: tomates
+      quantity: 2
+      unit: pièce
