@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Literal
 
+from panier.brands import BrandPreferenceAction, BrandPreferences
 from panier.models import (
     FoodProfile,
     Pantry,
@@ -25,6 +26,18 @@ class BasketRecommendation:
     by_item: dict[str, StoreOffer]
     savings_vs_best_single: float
     reason: str
+
+
+@dataclass(frozen=True)
+class StoreBasketOption:
+    stores: tuple[str, ...]
+    total: float | None
+    by_item: dict[str, StoreOffer]
+    missing_items: list[str]
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.missing_items
 
 
 CompareBy = Literal["price", "unit_price"]
@@ -330,6 +343,7 @@ def recommend_basket(
     split_min_savings_eur: float = 8.0,
     split_min_savings_percent: float = 10.0,
     compare_by: CompareBy = "price",
+    brand_preferences: BrandPreferences | None = None,
 ) -> BasketRecommendation:
     if max_stores < 1:
         raise ValueError("max_stores must be >= 1")
@@ -350,6 +364,7 @@ def recommend_basket(
         offers_by_item,
         [(store,) for store in stores],
         compare_by=compare_by,
+        brand_preferences=brand_preferences,
     )
     if best_single is None:
         raise ValueError("no single store can satisfy the full basket")
@@ -369,7 +384,11 @@ def recommend_basket(
         store_sets.extend(combinations(stores, count))
 
     best_split = _best_for_store_sets(
-        requested_items, offers_by_item, store_sets, compare_by=compare_by
+        requested_items,
+        offers_by_item,
+        store_sets,
+        compare_by=compare_by,
+        brand_preferences=brand_preferences,
     )
     if best_split is None:
         raise ValueError("no store combination can satisfy the full basket")
@@ -401,11 +420,67 @@ def recommend_basket(
     )
 
 
+def compare_basket_options(
+    items: list[ShoppingItem],
+    offers: list[StoreOffer],
+    *,
+    max_stores: int = 2,
+    compare_by: CompareBy = "price",
+    brand_preferences: BrandPreferences | None = None,
+) -> list[StoreBasketOption]:
+    if max_stores < 1:
+        raise ValueError("max_stores must be >= 1")
+
+    requested_items = [item.name for item in items]
+    offers_by_item: dict[str, list[StoreOffer]] = defaultdict(list)
+    stores = sorted({offer.store for offer in offers})
+    for offer in offers:
+        offers_by_item[offer.item].append(offer)
+
+    options: list[StoreBasketOption] = []
+    for store in stores:
+        options.append(
+            _basket_option_for_store_set(
+                requested_items,
+                offers_by_item,
+                (store,),
+                compare_by=compare_by,
+                brand_preferences=brand_preferences,
+            )
+        )
+
+    if len(stores) > 1 and max_stores > 1:
+        store_sets = [
+            store_set
+            for count in range(2, min(max_stores, len(stores)) + 1)
+            for store_set in combinations(stores, count)
+        ]
+        best_split = _best_for_store_sets(
+            requested_items,
+            offers_by_item,
+            store_sets,
+            compare_by=compare_by,
+            brand_preferences=brand_preferences,
+        )
+        if best_split is not None:
+            options.append(
+                StoreBasketOption(
+                    stores=best_split[0],
+                    total=best_split[1],
+                    by_item=best_split[2],
+                    missing_items=[],
+                )
+            )
+
+    return options
+
+
 def _best_for_store_sets(
     requested_items: list[str],
     offers_by_item: dict[str, list[StoreOffer]],
     store_sets: list[tuple[str, ...]],
     compare_by: CompareBy = "price",
+    brand_preferences: BrandPreferences | None = None,
 ) -> tuple[tuple[str, ...], float, dict[str, StoreOffer]] | None:
     best: tuple[tuple[str, ...], float, dict[str, StoreOffer]] | None = None
     best_metric: float | None = None
@@ -419,13 +494,11 @@ def _best_for_store_sets(
 
         for item in requested_items:
             candidates = [offer for offer in offers_by_item[item] if offer.store in allowed]
+            candidates = _filter_blocked_brand_offers(candidates, brand_preferences)
             if not candidates:
                 possible = False
                 break
-            offer = min(
-                candidates,
-                key=lambda candidate: _offer_compare_value(candidate, compare_by),
-            )
+            offer = choose_offer(candidates, compare_by, brand_preferences)
             chosen[item] = offer
             total += float(offer.price)
             comparable_total += _offer_compare_value(offer, compare_by)
@@ -435,6 +508,130 @@ def _best_for_store_sets(
             best = (tuple(sorted(store_set)), total, chosen)
 
     return best
+
+
+def _basket_option_for_store_set(
+    requested_items: list[str],
+    offers_by_item: dict[str, list[StoreOffer]],
+    store_set: tuple[str, ...],
+    compare_by: CompareBy = "price",
+    brand_preferences: BrandPreferences | None = None,
+) -> StoreBasketOption:
+    allowed = set(store_set)
+    chosen: dict[str, StoreOffer] = {}
+    total = 0.0
+    missing_items: list[str] = []
+
+    for item in requested_items:
+        candidates = [offer for offer in offers_by_item[item] if offer.store in allowed]
+        candidates = _filter_blocked_brand_offers(candidates, brand_preferences)
+        if not candidates:
+            missing_items.append(item)
+            continue
+        offer = choose_offer(candidates, compare_by, brand_preferences)
+        chosen[item] = offer
+        total += float(offer.price)
+
+    return StoreBasketOption(
+        stores=tuple(sorted(store_set)),
+        total=total if not missing_items else None,
+        by_item=chosen,
+        missing_items=missing_items,
+    )
+
+
+def choose_offer(
+    candidates: list[StoreOffer],
+    compare_by: CompareBy = "price",
+    brand_preferences: BrandPreferences | None = None,
+) -> StoreOffer:
+    if not candidates:
+        raise ValueError("candidates must not be empty")
+    candidates = _filter_blocked_brand_offers(candidates, brand_preferences)
+    if not candidates:
+        raise ValueError("no offer left after blocked brand filtering")
+    cheapest = min(candidates, key=lambda offer: _offer_sort_key(offer, compare_by))
+    if brand_preferences is None:
+        return cheapest
+
+    preferred = [
+        offer
+        for offer in candidates
+        if brand_preferences.action_for_offer(offer) == BrandPreferenceAction.PREFER
+    ]
+    if preferred:
+        preferred_choice = min(preferred, key=lambda offer: _offer_sort_key(offer, compare_by))
+        if _within_preferred_price_guardrail(
+            preferred_choice, cheapest, brand_preferences, compare_by
+        ):
+            return preferred_choice
+
+    if brand_preferences.action_for_offer(cheapest) == BrandPreferenceAction.AVOID:
+        non_avoided = [
+            offer
+            for offer in candidates
+            if brand_preferences.action_for_offer(offer) != BrandPreferenceAction.AVOID
+        ]
+        if non_avoided:
+            alternative = min(non_avoided, key=lambda offer: _offer_sort_key(offer, compare_by))
+            if not _avoid_savings_is_significant(
+                cheapest, alternative, brand_preferences, compare_by
+            ):
+                return alternative
+
+    return cheapest
+
+
+def _filter_blocked_brand_offers(
+    offers: list[StoreOffer], brand_preferences: BrandPreferences | None
+) -> list[StoreOffer]:
+    if brand_preferences is None:
+        return offers
+    return [
+        offer
+        for offer in offers
+        if brand_preferences.action_for_offer(offer) != BrandPreferenceAction.BLOCK
+    ]
+
+
+def _within_preferred_price_guardrail(
+    preferred: StoreOffer,
+    cheapest: StoreOffer,
+    brand_preferences: BrandPreferences,
+    compare_by: CompareBy,
+) -> bool:
+    preferred_value = _offer_compare_value(preferred, compare_by)
+    cheapest_value = _offer_compare_value(cheapest, compare_by)
+    extra = preferred_value - cheapest_value
+    if extra <= 0:
+        return True
+    extra_percent = (extra / cheapest_value) * 100 if cheapest_value else 0.0
+    return (
+        extra <= brand_preferences.prefer_max_price_delta_eur
+        and extra_percent <= brand_preferences.prefer_max_price_delta_percent
+    )
+
+
+def _avoid_savings_is_significant(
+    avoided: StoreOffer,
+    alternative: StoreOffer,
+    brand_preferences: BrandPreferences,
+    compare_by: CompareBy,
+) -> bool:
+    avoided_value = _offer_compare_value(avoided, compare_by)
+    alternative_value = _offer_compare_value(alternative, compare_by)
+    savings = alternative_value - avoided_value
+    if savings <= 0:
+        return False
+    savings_percent = (savings / alternative_value) * 100 if alternative_value else 0.0
+    return (
+        savings >= brand_preferences.avoid_min_savings_eur
+        or savings_percent >= brand_preferences.avoid_min_savings_percent
+    )
+
+
+def _offer_sort_key(offer: StoreOffer, compare_by: CompareBy) -> tuple[float, float, str, str]:
+    return (_offer_compare_value(offer, compare_by), float(offer.price), offer.store, offer.product)
 
 
 def _offer_compare_value(offer: StoreOffer, compare_by: CompareBy) -> float:

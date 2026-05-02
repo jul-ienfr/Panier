@@ -6,6 +6,13 @@ import yaml
 from typer.testing import CliRunner
 
 import panier.cli as cli
+from panier.brands import BrandPreferences, load_brand_preferences
+from panier.cart import (
+    CartLine,
+    cart_items_param,
+    cart_lines_from_recommendation,
+    store_search_url,
+)
 from panier.cli import app, managed_browser_profile_for_drive
 from panier.drive import (
     BrandType,
@@ -20,7 +27,13 @@ from panier.drive import (
 from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
 from panier.models import FoodProfile, Pantry, PriceMode, Recipe, ShoppingItem, StoreOffer
 from panier.nutrition import score_recipe_balance
-from panier.planner import consolidate_ingredients, recommend_basket, select_meals, subtract_pantry
+from panier.planner import (
+    compare_basket_options,
+    consolidate_ingredients,
+    recommend_basket,
+    select_meals,
+    subtract_pantry,
+)
 
 
 def test_select_meals_excludes_disliked_ingredients() -> None:
@@ -156,6 +169,24 @@ def test_economic_can_split_between_stores() -> None:
     assert recommendation.total == 2.0
 
 
+def test_compare_basket_options_reports_single_store_missing_and_hybrid_total() -> None:
+    items = [ShoppingItem(name="riz"), ShoppingItem(name="carottes")]
+    offers = [
+        StoreOffer(store="auchan", item="riz", product="Riz", price=2.0),
+        StoreOffer(store="auchan", item="carottes", product="Carottes", price=3.0),
+        StoreOffer(store="leclerc", item="riz", product="Riz", price=1.0),
+    ]
+
+    options = compare_basket_options(items, offers, max_stores=2)
+
+    by_store = {option.stores: option for option in options}
+    assert by_store[("auchan",)].total == 5.0
+    assert by_store[("auchan",)].missing_items == []
+    assert by_store[("leclerc",)].total is None
+    assert by_store[("leclerc",)].missing_items == ["carottes"]
+    assert by_store[("auchan", "leclerc")].total == 4.0
+
+
 def test_recommend_basket_can_compare_by_unit_price() -> None:
     items = [ShoppingItem(name="huile", quantity=1, unit="l")]
     offers = [
@@ -182,6 +213,93 @@ def test_recommend_basket_can_compare_by_unit_price() -> None:
     assert recommendation.stores == ("auchan",)
     assert recommendation.total == 3.0
     assert recommendation.by_item["huile"].product == "Huile 1L"
+
+
+def test_brand_preference_prefers_brand_within_price_guardrail() -> None:
+    items = [ShoppingItem(name="yaourt")]
+    offers = [
+        StoreOffer(store="leclerc", item="yaourt", product="Yaourt Eco", price=2.00),
+        StoreOffer(store="leclerc", item="yaourt", product="Yaourt Maison A", price=2.20),
+    ]
+    preferences = BrandPreferences(prefer={"maison a"})
+
+    recommendation = recommend_basket(
+        items,
+        offers,
+        PriceMode.SIMPLE,
+        max_stores=1,
+        brand_preferences=preferences,
+    )
+
+    assert recommendation.by_item["yaourt"].product == "Yaourt Maison A"
+    assert recommendation.total == 2.20
+
+
+def test_brand_preference_price_guardrail_keeps_much_cheaper_offer() -> None:
+    items = [ShoppingItem(name="yaourt")]
+    offers = [
+        StoreOffer(store="leclerc", item="yaourt", product="Yaourt Eco", price=2.00),
+        StoreOffer(store="leclerc", item="yaourt", product="Yaourt Maison A", price=3.50),
+    ]
+    preferences = BrandPreferences(prefer={"maison a"})
+
+    recommendation = recommend_basket(
+        items,
+        offers,
+        PriceMode.SIMPLE,
+        max_stores=1,
+        brand_preferences=preferences,
+    )
+
+    assert recommendation.by_item["yaourt"].product == "Yaourt Eco"
+
+
+def test_brand_preference_avoid_keeps_avoided_brand_only_for_big_savings() -> None:
+    items = [ShoppingItem(name="pates")]
+    preferences = BrandPreferences(avoid={"discounto"})
+
+    small_gap = recommend_basket(
+        items,
+        [
+            StoreOffer(store="leclerc", item="pates", product="Discounto Pâtes", price=1.00),
+            StoreOffer(store="leclerc", item="pates", product="Pâtes neutres", price=1.30),
+        ],
+        PriceMode.SIMPLE,
+        max_stores=1,
+        brand_preferences=preferences,
+    )
+    big_gap = recommend_basket(
+        items,
+        [
+            StoreOffer(store="leclerc", item="pates", product="Discounto Pâtes", price=1.00),
+            StoreOffer(store="leclerc", item="pates", product="Pâtes neutres", price=4.00),
+        ],
+        PriceMode.SIMPLE,
+        max_stores=1,
+        brand_preferences=preferences,
+    )
+
+    assert small_gap.by_item["pates"].product == "Pâtes neutres"
+    assert big_gap.by_item["pates"].product == "Discounto Pâtes"
+
+
+def test_brand_preference_block_excludes_brand() -> None:
+    items = [ShoppingItem(name="cafe")]
+    offers = [
+        StoreOffer(store="leclerc", item="cafe", product="Café Bloque", price=1.00),
+        StoreOffer(store="leclerc", item="cafe", product="Café OK", price=2.00),
+    ]
+    preferences = BrandPreferences(block={"bloque"})
+
+    recommendation = recommend_basket(
+        items,
+        offers,
+        PriceMode.SIMPLE,
+        max_stores=1,
+        brand_preferences=preferences,
+    )
+
+    assert recommendation.by_item["cafe"].product == "Café OK"
 
 
 def test_plan_with_prices_outputs_optimized_basket(tmp_path: Path) -> None:
@@ -274,9 +392,75 @@ offers:
     assert result.exit_code == 0
     assert "À acheter:" in result.output
     assert "- riz 150 g" in result.output
+    assert "Comparatif paniers:" in result.output
+    assert "- Tout leclerc: 11.55 €" in result.output
+    assert "- Tout intermarche: 11.40 €" in result.output
     assert "Recommandation achat:" in result.output
     assert "Total:" in result.output
     assert "Détail achat:" in result.output
+
+
+def test_brand_cli_persists_preferences_deterministically(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    prefer = runner.invoke(app, ["brand", "prefer", "Maison A", "--data-dir", str(tmp_path)])
+    avoid = runner.invoke(app, ["brand", "avoid", "Discounto", "--data-dir", str(tmp_path)])
+    block = runner.invoke(app, ["brand", "block", "Bloqué", "--data-dir", str(tmp_path)])
+    listed = runner.invoke(app, ["brand", "list", "--data-dir", str(tmp_path)])
+
+    assert prefer.exit_code == 0
+    assert avoid.exit_code == 0
+    assert block.exit_code == 0
+    assert listed.exit_code == 0
+    assert "prefer: maison a" in listed.output
+    assert "avoid: discounto" in listed.output
+    assert "block: bloqué" in listed.output
+    preferences = load_brand_preferences(tmp_path)
+    assert preferences.prefer == {"maison a"}
+    assert preferences.avoid == {"discounto"}
+    assert preferences.block == {"bloqué"}
+
+
+def test_compare_cli_applies_brand_preferences(tmp_path: Path) -> None:
+    runner = CliRunner()
+    shopping_list = tmp_path / "list.yaml"
+    prices = tmp_path / "prices.yaml"
+    shopping_list.write_text("items:\n  - name: yaourt\n", encoding="utf-8")
+    prices.write_text(
+        """
+offers:
+  - store: leclerc
+    item: yaourt
+    product: Yaourt Eco
+    price: 2.00
+  - store: leclerc
+    item: yaourt
+    product: Yaourt Maison A
+    price: 2.20
+""",
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["brand", "prefer", "Maison A", "--data-dir", str(tmp_path)])
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            str(shopping_list),
+            "--prices",
+            str(prices),
+            "--data-dir",
+            str(tmp_path),
+            "--mode",
+            "simple",
+            "--max-stores",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Yaourt Maison A" in result.output
+    assert "2.20 €" in result.output
 
 
 def test_pantry_cli_add_list_and_remove(tmp_path: Path) -> None:
@@ -1625,3 +1809,360 @@ offers:
     assert "Gratin riche" not in result.output
     assert "À acheter:" in result.output
     assert "Recommandation achat:" in result.output
+
+
+def test_cart_lines_group_recommendation_by_store() -> None:
+    grouped = cart_lines_from_recommendation(
+        {
+            "riz": StoreOffer(
+                store="leclerc",
+                item="riz",
+                product="Riz 1kg",
+                price=2.0,
+                url="https://l/riz",
+            ),
+            "tomates": StoreOffer(store="auchan", item="tomates", product="Tomates", price=1.5),
+        }
+    )
+
+    assert list(grouped) == ["auchan", "leclerc"]
+    assert grouped["leclerc"] == [
+        CartLine(
+            store="leclerc",
+            item="riz",
+            product="Riz 1kg",
+            quantity=1,
+            url="https://l/riz",
+            search_url=store_search_url("leclerc", "Riz 1kg"),
+        )
+    ]
+    assert (
+        cart_items_param(grouped["leclerc"])
+        == "riz|Riz 1kg|1|https://l/riz|"
+        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "recherche.aspx?TexteRecherche=Riz+1kg&tri=1|offer_collected"
+    )
+
+
+def test_managed_browser_client_runs_flow_with_params_and_side_effect_policy() -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps({"ok": True}))
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="leclerc", runner=fake_runner
+    )
+    result = client.flow_run(
+        "add-cart-leclerc",
+        params={"itemsB64": "cml6fFJpenwxfA==", "dryRunB64": "dHJ1ZQ=="},
+        max_side_effect_level="read_only",
+    )
+
+    assert result.data == {"ok": True}
+    assert calls == [[
+        "managed-browser",
+        "flow",
+        "run",
+        "add-cart-leclerc",
+        "--param",
+        "itemsB64=cml6fFJpenwxfA==",
+        "--param",
+        "dryRunB64=dHJ1ZQ==",
+        "--max-side-effect-level",
+        "read_only",
+        "--profile",
+        "courses",
+        "--site",
+        "leclerc",
+        "--json",
+    ]]
+
+
+def test_cart_lines_use_live_leclerc_drive_search_url_even_when_offer_url_is_blocked() -> None:
+    lines = cart_lines_from_recommendation(
+        {
+            "riz": StoreOffer(
+                store="leclerc",
+                item="riz",
+                product="Riz long Comptoir du Grain",
+                price=1.67,
+                url="https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=riz&tri=1#",
+            )
+        }
+    )["leclerc"]
+
+    assert lines[0].url.endswith("TexteRecherche=riz&tri=1#")
+    assert lines[0].search_url == (
+        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "recherche.aspx?TexteRecherche=Riz+long+Comptoir+du+Grain&tri=1"
+    )
+
+
+def test_run_cart_flow_live_navigates_and_clicks_without_flow_replay(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "storage" in args and "checkpoint" in args:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"result": {"value": {"checkpoint": "ok"}}}),
+            )
+        if "navigate" in args:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"result": {"value": {"tabId": "tab-live"}}}),
+            )
+        if "console" in args:
+            expression = args[args.index("--expression") + 1]
+            assert "dryRun\": false" in expression
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "value": {
+                                "catalog_found": True,
+                                "addable": True,
+                                "inserted": True,
+                                "url": "https://l/riz",
+                                "button_label": "Ajouter au panier",
+                            }
+                        }
+                    }
+                ),
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}")
+
+    def fake_init(self, **kwargs):
+        self.command = kwargs.get("command")
+        self.profile = kwargs.get("profile", "courses")
+        self.site = kwargs.get("site", "leclerc")
+        self.runner = fake_runner
+
+    monkeypatch.setattr(cli.ManagedBrowserClient, "__init__", fake_init)
+    result = cli.run_cart_flow_for_store(
+        "leclerc",
+        [
+            CartLine(
+                store="leclerc",
+                item="riz",
+                product="Riz Leclerc",
+                url="https://l/riz",
+                search_url="https://l/riz",
+            )
+        ],
+        profile="courses",
+        browser_command="managed-browser",
+        dry_run=False,
+    )
+
+    value = result.data
+    assert value["dryRun"] is False
+    assert len(value["catalog_found"]) == 1
+    assert len(value["addable"]) == 1
+    assert len(value["inserted"]) == 1
+    assert [call[1:3] for call in calls] == [
+        ["storage", "checkpoint"],
+        ["navigate", "--url"],
+        ["console", "eval"],
+    ]
+    assert "before-live-cart-leclerc" in calls[0]
+    assert all("flow" not in call for call in calls)
+
+
+def test_run_cart_flow_live_falls_back_from_offer_url_to_search_url(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "storage" in args and "checkpoint" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "navigate" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "console" in args:
+            navigate_count = sum(1 for call in calls if "navigate" in call)
+            found = navigate_count == 2
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "value": {
+                                "catalog_found": found,
+                                "addable": found,
+                                "inserted": found,
+                                "url": "https://leclerc/search" if found else "https://leclerc/blocked",
+                                "button_label": "Ajouter au panier" if found else "",
+                            }
+                        }
+                    }
+                ),
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}")
+
+    def fake_init(self, **kwargs):
+        self.command = kwargs.get("command")
+        self.profile = kwargs.get("profile", "courses")
+        self.site = kwargs.get("site", "leclerc")
+        self.runner = fake_runner
+
+    monkeypatch.setattr(cli.ManagedBrowserClient, "__init__", fake_init)
+    result = cli.run_cart_flow_for_store(
+        "leclerc",
+        [
+            CartLine(
+                store="leclerc",
+                item="riz",
+                product="Riz Leclerc",
+                url="https://leclerc/blocked",
+                search_url="https://leclerc/search",
+            )
+        ],
+        profile="courses",
+        browser_command="managed-browser",
+        dry_run=False,
+    )
+
+    value = result.data
+    assert len(value["catalog_found"]) == 1
+    assert len(value["addable"]) == 1
+    assert len(value["inserted"]) == 1
+    navigate_urls = [call[call.index("--url") + 1] for call in calls if "navigate" in call]
+    assert navigate_urls == ["https://leclerc/blocked", "https://leclerc/search"]
+    assert all("flow" not in call for call in calls)
+
+def test_plan_add_to_cart_runs_store_flows_in_dry_run(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: test riz tomates
+  ingredients:
+    - name: riz
+    - name: tomates
+  tags: [budget]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile.yaml").write_text("{}\n", encoding="utf-8")
+    prices = tmp_path / "prices.yaml"
+    prices.write_text(
+        """
+offers:
+  - store: leclerc
+    item: riz
+    product: Riz Leclerc
+    price: 2.0
+  - store: auchan
+    item: tomates
+    product: Tomates Auchan
+    price: 1.0
+  - store: leclerc
+    item: tomates
+    product: Tomates Leclerc
+    price: 2.0
+  - store: auchan
+    item: riz
+    product: Riz Auchan
+    price: 3.0
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, list[CartLine], bool]] = []
+
+    def fake_run_cart_flow_for_store(store, lines, *, profile, browser_command, dry_run):
+        calls.append((store, lines, dry_run))
+        return cli.BrowserCommandResult(
+            action="flow",
+            data={
+                "result": {
+                    "results": [
+                        {
+                            "result": {
+                                "value": {
+                                    "ok": True,
+                                    "catalog_found": [line.product for line in lines],
+                                    "addable": [],
+                                    "inserted": [],
+                                    "message": f"Dry-run {store}",
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+        )
+
+    monkeypatch.setattr(cli, "run_cart_flow_for_store", fake_run_cart_flow_for_store)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "plan",
+            "--data-dir",
+            str(tmp_path),
+            "--prices",
+            str(prices),
+            "--no-pantry",
+            "--add-to-cart",
+            "--cart-dry-run",
+            "--mode",
+            "economic",
+            "--max-stores",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Paniers à préparer:" in result.output
+    assert "Produits trouvés/catalogue: 1" in result.output
+    assert "Produits ajoutables/disponibles: 0" in result.output
+    assert "Produits effectivement insérés: 0" in result.output
+    assert calls == [
+        (
+            "auchan",
+            [
+                CartLine(
+                    store="auchan",
+                    item="tomates",
+                    product="Tomates Auchan",
+                    quantity=1,
+                    url=None,
+                    search_url="https://www.auchan.fr/recherche?text=Tomates+Auchan",
+                )
+            ],
+            True,
+        ),
+        (
+            "leclerc",
+            [
+                CartLine(
+                    store="leclerc",
+                    item="riz",
+                    product="Riz Leclerc",
+                    quantity=1,
+                    url=None,
+                    search_url=(
+                        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+                        "recherche.aspx?TexteRecherche=Riz+Leclerc&tri=1"
+                    ),
+                )
+            ],
+            True,
+        ),
+    ]

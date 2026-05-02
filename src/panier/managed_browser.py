@@ -80,6 +80,22 @@ class ManagedBrowserClient:
     def snapshot(self) -> BrowserCommandResult:
         return self._run(["snapshot"])
 
+    def flow_run(
+        self,
+        flow: str,
+        *,
+        params: dict[str, str] | None = None,
+        max_side_effect_level: str = "submit_apply",
+        allow_llm_repair: bool = False,
+    ) -> BrowserCommandResult:
+        args = ["flow", "run", flow]
+        for key, value in (params or {}).items():
+            args.extend(["--param", f"{key}={value}"])
+        args.extend(["--max-side-effect-level", max_side_effect_level])
+        if allow_llm_repair:
+            args.append("--allow-llm-repair")
+        return self._run(args)
+
     def checkpoint(self, reason: str) -> BrowserCommandResult:
         return self._run(["storage", "checkpoint", "--reason", reason])
 

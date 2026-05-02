@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -9,7 +10,22 @@ import typer
 import yaml
 
 from panier import __version__
+from panier.brands import (
+    BrandPreferenceAction,
+    BrandPreferences,
+    brand_preferences_path,
+    load_brand_preferences,
+    save_brand_preferences,
+)
+from panier.cart import (
+    CART_ADD_EVAL_JS,
+    CartLine,
+    cart_items_b64_param,
+    cart_items_json_param,
+    cart_lines_from_recommendation,
+)
 from panier.catalog import ProductCatalog, load_catalog
+from panier.constraints import BasketConstraints, load_constraints, save_constraints
 from panier.deterministic import NO_LLM_ENV_VAR, explain_item, no_llm_status
 from panier.drive import (
     best_offer_for_item,
@@ -17,7 +33,7 @@ from panier.drive import (
     collect_drive_offers,
     open_drive_searches,
 )
-from panier.managed_browser import ManagedBrowserClient, ManagedBrowserError
+from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
     Ingredient,
@@ -33,6 +49,7 @@ from panier.models import (
 from panier.nutrition import BalanceScore, score_recipe_balance
 from panier.planner import (
     CompareBy,
+    compare_basket_options,
     consolidate_ingredients,
     consume_pantry,
     filter_recipes,
@@ -40,6 +57,14 @@ from panier.planner import (
     recommend_basket,
     select_meals,
     subtract_pantry,
+)
+from panier.price_cache import add_offers_to_cache, load_price_cache, price_cache_path
+from panier.substitutions import (
+    SubstitutionCatalog,
+    load_substitutions,
+    save_substitutions,
+    substitute_offers_for_requested_items,
+    substitutions_path,
 )
 
 app = typer.Typer(
@@ -53,6 +78,11 @@ shopping_app = typer.Typer(help="Générer des listes de courses.")
 drive_app = typer.Typer(help="Préparer les recherches et paniers drive.")
 llm_app = typer.Typer(help="État et garde-fous LLM.")
 explain_app = typer.Typer(help="Expliquer les choix déterministes locaux.")
+brand_app = typer.Typer(help="Gérer les préférences de marques déterministes.")
+cache_app = typer.Typer(help="Gérer le cache local des prix/offres.")
+substitution_app = typer.Typer(help="Gérer les substitutions déterministes d'articles.")
+constraint_app = typer.Typer(help="Gérer les contraintes panier déterministes.")
+doctor_app = typer.Typer(help="Diagnostiquer la configuration déterministe locale.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
@@ -60,6 +90,11 @@ app.add_typer(shopping_app, name="shopping")
 app.add_typer(drive_app, name="drive")
 app.add_typer(llm_app, name="llm")
 app.add_typer(explain_app, name="explain")
+app.add_typer(brand_app, name="brand")
+app.add_typer(cache_app, name="cache")
+app.add_typer(substitution_app, name="substitution")
+app.add_typer(constraint_app, name="constraint")
+app.add_typer(doctor_app, name="doctor")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -133,6 +168,52 @@ def load_offers(prices: Path) -> list[StoreOffer]:
     return [StoreOffer.model_validate(offer) for offer in price_data.get("offers", [])]
 
 
+def read_shopping_items(path: Path) -> list[ShoppingItem]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+
+
+def offers_for_requested_items(
+    items: list[ShoppingItem], offers: list[StoreOffer]
+) -> list[StoreOffer]:
+    requested = {item.name for item in items}
+    return [offer for offer in offers if offer.item in requested]
+
+
+def prepare_items_and_offers(
+    items: list[ShoppingItem],
+    offers: list[StoreOffer],
+    data_dir: Path,
+) -> tuple[list[ShoppingItem], list[StoreOffer], BasketConstraints]:
+    substitutions = load_substitutions(data_dir)
+    constraints = load_constraints(data_dir)
+    expanded_offers = substitute_offers_for_requested_items(items, offers, substitutions)
+    filtered_offers = apply_store_constraints(expanded_offers, constraints)
+    return items, filtered_offers, constraints
+
+
+def apply_store_constraints(
+    offers: list[StoreOffer], constraints: BasketConstraints
+) -> list[StoreOffer]:
+    blocked = {normalize_name(store) for store in constraints.blocked_stores}
+    if not blocked:
+        return offers
+    return [offer for offer in offers if normalize_name(offer.store) not in blocked]
+
+
+def validate_recommendation_constraints(
+    total: float, item_count: int, constraints: BasketConstraints
+) -> list[str]:
+    issues: list[str] = []
+    if constraints.max_total_eur is not None and total > constraints.max_total_eur:
+        issues.append(f"total {total:.2f} € > budget {constraints.max_total_eur:.2f} €")
+    if constraints.min_items is not None and item_count < constraints.min_items:
+        issues.append(f"{item_count} articles < minimum {constraints.min_items}")
+    if constraints.max_items is not None and item_count > constraints.max_items:
+        issues.append(f"{item_count} articles > maximum {constraints.max_items}")
+    return issues
+
+
 def parse_quantity_unit(value: str) -> tuple[float, str | None]:
     text = value.strip()
     number = ""
@@ -195,6 +276,179 @@ def managed_browser_profile_for_drive(profile: str, drive: str) -> str:
     return profile
 
 
+def cart_flow_name_for_drive(drive: str) -> str:
+    normalized = normalize_name(drive)
+    if normalized in {"auchan", "leclerc"}:
+        return f"add-cart-{normalized}"
+    raise typer.BadParameter(f"Drive non supporté pour ajout panier : {drive}")
+
+
+def _cart_add_expression(line: CartLine, *, dry_run: bool) -> str:
+    payload = {
+        "item": line.item,
+        "product": line.product,
+        "quantity": line.quantity,
+        "dryRun": dry_run,
+    }
+    return f"({CART_ADD_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+
+
+def _flow_payload_from_line_results(
+    store: str, lines: list[CartLine], line_results: list[dict], *, dry_run: bool
+) -> dict:
+    catalog_found = []
+    addable = []
+    inserted = []
+    for line, result in zip(lines, line_results, strict=False):
+        entry = {
+            "item": line.item,
+            "product": line.product,
+            "url": result.get("url") or line.url or line.search_url,
+            "button_label": result.get("button_label") or "",
+        }
+        if result.get("catalog_found"):
+            catalog_found.append({**entry, "status": "catalog_found"})
+        if result.get("addable"):
+            addable.append({**entry, "status": "addable"})
+        if result.get("inserted"):
+            inserted.append({**entry, "status": "inserted"})
+    return {
+        "ok": True,
+        "store": store,
+        "dryRun": dry_run,
+        "catalog_found": catalog_found,
+        "addable": addable,
+        "inserted": inserted,
+        "line_results": line_results,
+        "requires_live_flow": False,
+        "message": (
+            f"Dry-run {store}: pages produit/recherche inspectées, aucun clic panier exécuté."
+            if dry_run
+            else (
+                f"Live {store}: clics Ajouter au panier exécutés pour les "
+                "produits ajoutables; aucun paiement/commande."
+            )
+        ),
+    }
+
+
+def run_cart_flow_for_store(
+    store: str,
+    lines: list[CartLine],
+    *,
+    profile: str,
+    browser_command: str | None,
+    dry_run: bool,
+) -> BrowserCommandResult:
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=managed_browser_profile_for_drive(profile, store),
+        site=store,
+    )
+    if dry_run:
+        return browser.flow_run(
+            cart_flow_name_for_drive(store),
+            params={
+                "itemsB64": cart_items_b64_param(lines),
+                "itemsJson": cart_items_json_param(lines),
+                "dryRunB64": "dHJ1ZQ==",
+            },
+            max_side_effect_level="read_only",
+        )
+
+    line_results: list[dict] = []
+    if not lines:
+        return BrowserCommandResult(
+            action="flow",
+            data=_flow_payload_from_line_results(store, lines, [], dry_run=False),
+        )
+    browser.checkpoint(f"before-live-cart-{store}")
+    for line in lines:
+        target_urls = [url for url in [line.url, line.search_url] if url]
+        if not target_urls:
+            line_results.append(
+                {
+                    "item": line.item,
+                    "product": line.product,
+                    "catalog_found": False,
+                    "addable": False,
+                    "inserted": False,
+                    "error": "aucune URL produit/recherche disponible",
+                }
+            )
+            continue
+        fallback_result: dict | None = None
+        for target_url in target_urls:
+            browser.navigate(target_url)
+            raw_result = browser.console_eval(_cart_add_expression(line, dry_run=False)).data
+            value = raw_result.get("result", {}).get("value", raw_result)
+            line_result = value if isinstance(value, dict) else {"raw": value}
+            if (
+                line_result.get("catalog_found")
+                or line_result.get("addable")
+                or line_result.get("inserted")
+            ):
+                line_results.append(line_result)
+                break
+            fallback_result = line_result
+        else:
+            line_results.append(fallback_result or {"error": "aucun résultat navigateur"})
+    return BrowserCommandResult(
+        action="flow",
+        data=_flow_payload_from_line_results(store, lines, line_results, dry_run=False),
+    )
+
+
+def echo_cart_plan(grouped_lines: dict[str, list[CartLine]]) -> None:
+    typer.echo("\nPaniers à préparer:")
+    for store, lines in grouped_lines.items():
+        typer.echo(f"- {store}:")
+        for line in lines:
+            typer.echo(
+                f"  - {line.product} x{line.quantity} ({line.item}) — "
+                "offre collectée; disponibilité/ajout panier à vérifier"
+            )
+
+
+def cart_flow_value(result: BrowserCommandResult) -> dict:
+    """Extrait le payload métier retourné par un flow Managed Browser."""
+    payload = result.data
+    nested = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(nested, dict):
+        return payload if isinstance(payload, dict) else {}
+    steps = nested.get("results")
+    if isinstance(steps, list) and steps:
+        last = steps[-1]
+        if isinstance(last, dict):
+            step_result = last.get("result")
+            if isinstance(step_result, dict) and isinstance(step_result.get("value"), dict):
+                return step_result["value"]
+    return nested
+
+
+def echo_cart_flow_result(store: str, result: BrowserCommandResult, *, dry_run: bool) -> None:
+    value = cart_flow_value(result)
+    suffix = "dry-run" if dry_run else "live"
+    catalog_found = (
+        value.get("catalog_found") if isinstance(value.get("catalog_found"), list) else []
+    )
+    addable = value.get("addable") if isinstance(value.get("addable"), list) else []
+    inserted = value.get("inserted") if isinstance(value.get("inserted"), list) else []
+    typer.echo(f"Flow panier {store} exécuté ({suffix}).")
+    typer.echo(f"  Produits trouvés/catalogue: {len(catalog_found)}")
+    typer.echo(f"  Produits ajoutables/disponibles: {len(addable)}")
+    typer.echo(f"  Produits effectivement insérés: {len(inserted)}")
+    message = value.get("message")
+    if message:
+        typer.echo(f"  Note: {message}")
+    if value.get("requires_live_flow"):
+        typer.echo(
+            "  Attention: le clic réel d'ajout panier n'est pas encore "
+            "appris/validé pour ce drive.",
+            err=True,
+        )
+
+
 def collect_offers_for_drives(
     items: list[ShoppingItem],
     drives: list[str],
@@ -203,8 +457,9 @@ def collect_offers_for_drives(
     browser_command: str | None,
     max_results: int,
     catalog: ProductCatalog | None = None,
-) -> list[StoreOffer]:
+) -> tuple[list[StoreOffer], bool]:
     offers: list[StoreOffer] = []
+    had_failure = False
     for drive in drives:
         resolved_profile = managed_browser_profile_for_drive(profile, drive)
         browser = ManagedBrowserClient(
@@ -215,6 +470,7 @@ def collect_offers_for_drives(
                 items, drive, browser, max_results=max_results, catalog=catalog
             )
         except ManagedBrowserError as exc:
+            had_failure = True
             typer.echo(
                 f"Avertissement Managed Browser {drive}: {exc}; collecte ignorée pour ce drive.",
                 err=True,
@@ -222,7 +478,7 @@ def collect_offers_for_drives(
             continue
         typer.echo(f"Collecte {drive}: {len(collected)} offres")
         offers.extend(collected)
-    return offers
+    return offers, had_failure
 
 
 def _collect_drive_offers_with_optional_catalog(
@@ -303,6 +559,41 @@ def format_item(item: ShoppingItem) -> str:
     return f"{item.name}{quantity}{unit}"
 
 
+def echo_basket_options(
+    items: list[ShoppingItem],
+    offers: list[StoreOffer],
+    *,
+    max_stores: int,
+    compare_by: CompareBy,
+    brand_preferences: BrandPreferences | None = None,
+) -> None:
+    options = compare_basket_options(
+        items,
+        offers,
+        max_stores=max_stores,
+        compare_by=compare_by,
+        brand_preferences=brand_preferences,
+    )
+    if not options:
+        return
+
+    typer.echo("\nComparatif paniers:")
+    for option in options:
+        label = " + ".join(option.stores)
+        if len(option.stores) == 1:
+            label = f"Tout {label}"
+        else:
+            label = f"Hybride {label}"
+        if option.total is None:
+            partial_total = sum(float(offer.price) for offer in option.by_item.values())
+            typer.echo(
+                f"- {label}: incomplet ({partial_total:.2f} € partiel; manque: "
+                f"{', '.join(option.missing_items)})"
+            )
+        else:
+            typer.echo(f"- {label}: {option.total:.2f} €")
+
+
 def echo_recommendation(
     items: list[ShoppingItem],
     recommendation_items: dict[str, StoreOffer],
@@ -314,6 +605,10 @@ def echo_recommendation(
     compare_by: CompareBy = "price",
 ) -> None:
     typer.echo("\nRecommandation achat:")
+    if len(stores) > 1:
+        typer.echo("Type: panier hybride — commander dans plusieurs drives")
+    else:
+        typer.echo("Type: panier simple — commander dans un seul drive")
     typer.echo(f"Mode: {mode}")
     typer.echo(f"Drives: {', '.join(stores)}")
     typer.echo(f"Total: {total:.2f} €")
@@ -338,6 +633,43 @@ def format_offer_price(
     if compare_by == "unit_price" and offer.unit_price is not None:
         return f"{price}; {offer.unit_price:.2f} €/{unit_price_label(item)}"
     return price
+
+
+def explain_offer_lines(
+    item: ShoppingItem,
+    offer: StoreOffer,
+    *,
+    compare_by: CompareBy,
+    brand_preferences: BrandPreferences,
+    substitutions: SubstitutionCatalog,
+) -> list[str]:
+    chosen = best_offer_for_item(item, [offer], compare_by=compare_by)
+    brand_action = brand_preferences.action_for_offer(offer)
+    substitute_source = next(
+        (
+            rule.item
+            for rule in substitutions.rules
+            if normalize_name(offer.item) in rule.substitutes
+            and normalize_name(item.name) == rule.item
+        ),
+        None,
+    )
+    lines = [
+        f"Article demandé: {format_item(item)}",
+        f"Offre: {offer.product}",
+        f"Drive: {offer.store}",
+        f"Prix: {format_offer_price(offer, item, compare_by)}",
+        f"Confiance: {offer.confidence}",
+    ]
+    if chosen is not None:
+        lines.append(f"Score matching: {chosen.score:.2f} ({chosen.reason})")
+    lines.append(f"Préférence marque: {brand_action.value}")
+    if substitute_source:
+        lines.append(f"Substitution: {substitute_source} -> {offer.item}")
+    else:
+        lines.append("Substitution: non")
+    lines.append("Décision: déterministe locale, aucun appel LLM")
+    return lines
 
 
 def unit_price_label(item: ShoppingItem | None) -> str:
@@ -406,6 +738,252 @@ def explain_item_command(
     typer.echo(f"Requête: {explanation.query}")
     typer.echo(f"Confiance: {explanation.confidence}")
     typer.echo(f"Raison: {explanation.reason}")
+
+
+def _brand_action_label(action: BrandPreferenceAction) -> str:
+    return {
+        BrandPreferenceAction.PREFER: "préférée",
+        BrandPreferenceAction.AVOID: "à éviter",
+        BrandPreferenceAction.BLOCK: "bloquée",
+        BrandPreferenceAction.NEUTRAL: "neutre",
+    }[action]
+
+
+def _set_brand_preference(
+    action: BrandPreferenceAction, brand: str, data_dir: Path
+) -> None:
+    preferences = load_brand_preferences(data_dir)
+    normalized = preferences.add(action, brand)
+    save_brand_preferences(data_dir, preferences)
+    typer.echo(f"Marque {normalized}: {_brand_action_label(action)}")
+
+
+@explain_app.command("offer")
+def explain_offer_command(
+    item: Annotated[str, typer.Argument(help="Article demandé")],
+    product: Annotated[str, typer.Argument(help="Produit/offre à expliquer")],
+    price: Annotated[float, typer.Option("--price", min=0.01)],
+    store: Annotated[str, typer.Option("--store")] = "local",
+    unit_price: Annotated[float | None, typer.Option("--unit-price", min=0.01)] = None,
+    confidence: Annotated[str, typer.Option("--confidence")] = "medium",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+) -> None:
+    shopping_item = ShoppingItem(name=item)
+    offer = StoreOffer(
+        store=store,
+        item=shopping_item.name,
+        product=product,
+        price=price,
+        unit_price=unit_price,
+        confidence=confidence,
+    )
+    for line in explain_offer_lines(
+        shopping_item,
+        offer,
+        compare_by=normalize_compare_by(compare_by),
+        brand_preferences=load_brand_preferences(data_dir),
+        substitutions=load_substitutions(data_dir),
+    ):
+        typer.echo(line)
+
+
+@brand_app.command("prefer")
+def brand_prefer(
+    brand: Annotated[str, typer.Argument(help="Marque à privilégier")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    _set_brand_preference(BrandPreferenceAction.PREFER, brand, data_dir)
+
+
+@brand_app.command("avoid")
+def brand_avoid(
+    brand: Annotated[str, typer.Argument(help="Marque à éviter sauf gros avantage prix")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    _set_brand_preference(BrandPreferenceAction.AVOID, brand, data_dir)
+
+
+@brand_app.command("block")
+def brand_block(
+    brand: Annotated[str, typer.Argument(help="Marque à exclure totalement")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    _set_brand_preference(BrandPreferenceAction.BLOCK, brand, data_dir)
+
+
+@brand_app.command("remove")
+def brand_remove(
+    brand: Annotated[str, typer.Argument(help="Marque à retirer des préférences")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    preferences = load_brand_preferences(data_dir)
+    normalized = preferences.remove(brand)
+    save_brand_preferences(data_dir, preferences)
+    typer.echo(f"Marque retirée: {normalized}")
+
+
+@brand_app.command("list")
+def brand_list(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    preferences = load_brand_preferences(data_dir)
+    typer.echo(f"Fichier: {brand_preferences_path(data_dir)}")
+    for label, values in (
+        ("prefer", preferences.prefer),
+        ("avoid", preferences.avoid),
+        ("block", preferences.block),
+    ):
+        rendered = ", ".join(sorted(values)) if values else "—"
+        typer.echo(f"{label}: {rendered}")
+    typer.echo(
+        "Garde-fou prefer: "
+        f"+{preferences.prefer_max_price_delta_eur:g} € et "
+        f"+{preferences.prefer_max_price_delta_percent:g} % max"
+    )
+    typer.echo(
+        "Garde-fou avoid: avantage prix significatif si "
+        f">={preferences.avoid_min_savings_eur:g} € ou "
+        f">={preferences.avoid_min_savings_percent:g} %"
+    )
+
+
+@brand_app.command("show")
+def brand_show(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    preferences = load_brand_preferences(data_dir)
+    typer.echo(
+        yaml.safe_dump(
+            preferences.model_dump(mode="json"),
+            allow_unicode=True,
+            sort_keys=True,
+        )
+    )
+
+
+@cache_app.command("show")
+def cache_show(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    cache = load_price_cache(data_dir)
+    typer.echo(f"Fichier: {price_cache_path(data_dir)}")
+    typer.echo(f"Offres: {len(cache.offers)}")
+    for offer in cache.offers:
+        typer.echo(f"- {offer.item}: {offer.product} — {offer.store} — {offer.price:.2f} €")
+
+
+@cache_app.command("import")
+def cache_import(
+    prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    offers = load_offers(prices)
+    cache = add_offers_to_cache(data_dir, offers)
+    typer.echo(f"Offres importées: {len(offers)}")
+    typer.echo(f"Cache: {price_cache_path(data_dir)} ({len(cache.offers)} offres)")
+
+
+@substitution_app.command("add")
+def substitution_add(
+    item: Annotated[str, typer.Argument(help="Article source")],
+    substitute: Annotated[str, typer.Argument(help="Article substitut")],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    catalog = load_substitutions(data_dir)
+    normalized_item, normalized_substitute = catalog.add(item, substitute)
+    save_substitutions(data_dir, catalog)
+    typer.echo(f"Substitution ajoutée: {normalized_item} -> {normalized_substitute}")
+
+
+@substitution_app.command("remove")
+def substitution_remove(
+    item: Annotated[str, typer.Argument(help="Article source")],
+    substitute: Annotated[
+        str | None, typer.Argument(help="Substitut précis, sinon règle entière")
+    ] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    catalog = load_substitutions(data_dir)
+    normalized_item, normalized_substitute = catalog.remove(item, substitute)
+    save_substitutions(data_dir, catalog)
+    if normalized_substitute:
+        typer.echo(f"Substitution retirée: {normalized_item} -> {normalized_substitute}")
+    else:
+        typer.echo(f"Substitutions retirées: {normalized_item}")
+
+
+@substitution_app.command("list")
+def substitution_list(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    catalog = load_substitutions(data_dir)
+    typer.echo(f"Fichier: {substitutions_path(data_dir)}")
+    if not catalog.rules:
+        typer.echo("- aucune substitution")
+        return
+    for rule in catalog.rules:
+        typer.echo(f"- {rule.item}: {', '.join(rule.substitutes)}")
+
+
+@constraint_app.command("show")
+def constraint_show(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    typer.echo(
+        yaml.safe_dump(
+            load_constraints(data_dir).model_dump(mode="json"),
+            allow_unicode=True,
+            sort_keys=True,
+        )
+    )
+
+
+@constraint_app.command("set")
+def constraint_set(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    max_total_eur: Annotated[float | None, typer.Option("--max-total-eur", min=0.01)] = None,
+    min_items: Annotated[int | None, typer.Option("--min-items", min=0)] = None,
+    max_items: Annotated[int | None, typer.Option("--max-items", min=1)] = None,
+    blocked_store: Annotated[list[str] | None, typer.Option("--blocked-store")] = None,
+    preferred_store: Annotated[list[str] | None, typer.Option("--preferred-store")] = None,
+) -> None:
+    constraints = load_constraints(data_dir)
+    payload = constraints.model_dump()
+    for key, value in (
+        ("max_total_eur", max_total_eur),
+        ("min_items", min_items),
+        ("max_items", max_items),
+    ):
+        if value is not None:
+            payload[key] = value
+    if blocked_store is not None:
+        payload["blocked_stores"] = [normalize_name(store) for store in blocked_store]
+    if preferred_store is not None:
+        payload["preferred_stores"] = [normalize_name(store) for store in preferred_store]
+    updated = BasketConstraints.model_validate(payload)
+    save_constraints(data_dir, updated)
+    typer.echo("Contraintes sauvegardées")
+
+
+@doctor_app.command("determinism")
+def doctor_determinism(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    status = no_llm_status(cli_no_llm=current_cli_no_llm())
+    typer.echo("Diagnostic déterminisme Panier")
+    typer.echo(f"Mode: {status.mode}")
+    typer.echo(f"LLM autorisé: {'non' if status.no_llm else 'oui'}")
+    for label, path in (
+        ("profil", profile_path(data_dir)),
+        ("recettes", recipes_path(data_dir)),
+        ("stock", pantry_path(data_dir)),
+        ("marques", brand_preferences_path(data_dir)),
+        ("substitutions", substitutions_path(data_dir)),
+        ("cache prix", price_cache_path(data_dir)),
+    ):
+        typer.echo(f"{label}: {'présent' if path.exists() else 'absent'} — {path}")
+    typer.echo("Chemin critique: règles locales + fichiers YAML + tie-breaks stables")
 
 
 @profile_app.command("init")
@@ -703,6 +1281,7 @@ def shopping_from_recipe(
         mode=mode,
         max_stores=max_stores,
         compare_by=comparison,
+        brand_preferences=load_brand_preferences(data_dir),
     )
     echo_recommendation(
         items=items,
@@ -724,8 +1303,7 @@ def drive_plan(
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
 ) -> None:
-    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    items = read_shopping_items(shopping_list)
     catalog = load_catalog(data_dir)
     echo_items("Liste drive:", items)
     typer.echo("\nRecherches à lancer:")
@@ -747,8 +1325,7 @@ def drive_open(
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
 ) -> None:
-    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    items = read_shopping_items(shopping_list)
     catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
         command=browser_command,
@@ -775,11 +1352,12 @@ def drive_pick(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [...]")],
     prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    items = read_shopping_items(shopping_list)
     offers = load_offers(prices)
     comparison = normalize_compare_by(compare_by)
+    items, offers, _constraints = prepare_items_and_offers(items, offers, data_dir)
     typer.echo("Meilleurs produits:")
     for item in items:
         chosen = best_offer_for_item(item, offers, compare_by=comparison)
@@ -805,12 +1383,12 @@ def drive_collect(
     ] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
+    update_cache: Annotated[bool, typer.Option("--update-cache/--no-update-cache")] = False,
     data_dir: Annotated[
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
 ) -> None:
-    data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    items = [ShoppingItem.model_validate(item) for item in data.get("items", [])]
+    items = read_shopping_items(shopping_list)
     resolved_profile = managed_browser_profile_for_drive(profile, site or drive)
     catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
@@ -826,6 +1404,9 @@ def drive_collect(
         typer.echo(f"Erreur Managed Browser: {exc}", err=True)
         raise typer.Exit(1) from exc
 
+    if update_cache:
+        add_offers_to_cache(data_dir, offers)
+        typer.echo(f"Cache prix mis à jour: {price_cache_path(data_dir)}")
     payload = {"offers": [offer.model_dump(mode="json") for offer in offers]}
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -996,6 +1577,7 @@ def recipe_shopping(
         mode=mode,
         max_stores=max_stores,
         compare_by=comparison,
+        brand_preferences=load_brand_preferences(data_dir),
     )
     echo_recommendation(
         items=items,
@@ -1076,6 +1658,20 @@ def plan(
     ] = None,
     balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
     = False,
+    add_to_cart: Annotated[
+        bool,
+        typer.Option(
+            "--add-to-cart",
+            help="Préparer les paniers drive avec les produits recommandés.",
+        ),
+    ] = False,
+    cart_dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--cart-dry-run/--cart-live",
+            help="Dry-run par défaut: n'ajoute rien réellement.",
+        ),
+    ] = True,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -1111,9 +1707,10 @@ def plan(
         typer.echo(f"- {format_item(item)}")
 
     offers: list[StoreOffer] | None = None
+    collect_had_failure = False
     if collect:
         drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
-        offers = collect_offers_for_drives(
+        offers, collect_had_failure = collect_offers_for_drives(
             items,
             drives,
             profile=profile,
@@ -1137,15 +1734,38 @@ def plan(
 
     if offers is None:
         return
+    if not offers and collect_had_failure:
+        typer.echo(
+            "Recommandation indisponible: aucune offre collectée; "
+            "voir les avertissements Managed Browser.",
+            err=True,
+        )
+        return
 
     comparison = normalize_compare_by(compare_by)
-    recommendation = recommend_basket(
+    items, offers, constraints = prepare_items_and_offers(items, offers, data_dir)
+    brand_preferences = load_brand_preferences(data_dir)
+    echo_basket_options(
         items,
         offers,
-        mode=mode,
         max_stores=max_stores,
         compare_by=comparison,
+        brand_preferences=brand_preferences,
     )
+    try:
+        recommendation = recommend_basket(
+            items,
+            offers,
+            mode=mode,
+            max_stores=max_stores,
+            compare_by=comparison,
+            brand_preferences=brand_preferences,
+        )
+    except ValueError as exc:
+        if collect:
+            typer.echo(f"Recommandation indisponible: {exc}", err=True)
+            return
+        raise
     echo_recommendation(
         items=items,
         recommendation_items=recommendation.by_item,
@@ -1156,6 +1776,29 @@ def plan(
         reason=recommendation.reason,
         compare_by=comparison,
     )
+    constraint_issues = validate_recommendation_constraints(
+        recommendation.total, len(recommendation.by_item), constraints
+    )
+    if constraint_issues:
+        typer.echo("\nContraintes non satisfaites:", err=True)
+        for issue in constraint_issues:
+            typer.echo(f"- {issue}", err=True)
+    if add_to_cart:
+        grouped_lines = cart_lines_from_recommendation(recommendation.by_item)
+        echo_cart_plan(grouped_lines)
+        for store, lines in grouped_lines.items():
+            try:
+                result = run_cart_flow_for_store(
+                    store,
+                    lines,
+                    profile=profile,
+                    browser_command=browser_command,
+                    dry_run=cart_dry_run,
+                )
+            except ManagedBrowserError as exc:
+                typer.echo(f"Ajout panier {store} indisponible: {exc}", err=True)
+                continue
+            echo_cart_flow_result(store, result, dry_run=cart_dry_run)
 
 
 @app.command("week")
@@ -1215,9 +1858,10 @@ def week(
         typer.echo(f"- {format_item(item)}")
 
     offers: list[StoreOffer] | None = None
+    collect_had_failure = False
     if collect:
         drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
-        offers = collect_offers_for_drives(
+        offers, collect_had_failure = collect_offers_for_drives(
             items,
             drives,
             profile=profile,
@@ -1241,12 +1885,36 @@ def week(
 
     if offers is None:
         return
+    if not offers and collect_had_failure:
+        typer.echo(
+            "Recommandation indisponible: aucune offre collectée; "
+            "voir les avertissements Managed Browser.",
+            err=True,
+        )
+        return
     comparison = normalize_compare_by(compare_by)
+    items, offers, constraints = prepare_items_and_offers(items, offers, data_dir)
+    brand_preferences = load_brand_preferences(data_dir)
+    echo_basket_options(
+        items,
+        offers,
+        max_stores=max_stores,
+        compare_by=comparison,
+        brand_preferences=brand_preferences,
+    )
     try:
         recommendation = recommend_basket(
-            items, offers, mode=mode, max_stores=max_stores, compare_by=comparison
+            items,
+            offers,
+            mode=mode,
+            max_stores=max_stores,
+            compare_by=comparison,
+            brand_preferences=brand_preferences,
         )
     except ValueError as exc:
+        if collect:
+            typer.echo(f"Recommandation indisponible: {exc}", err=True)
+            return
         typer.echo(f"Recommandation indisponible: {exc}", err=True)
         raise typer.Exit(1) from exc
     echo_recommendation(
@@ -1259,25 +1927,43 @@ def week(
         reason=recommendation.reason,
         compare_by=comparison,
     )
+    constraint_issues = validate_recommendation_constraints(
+        recommendation.total, len(recommendation.by_item), constraints
+    )
+    if constraint_issues:
+        typer.echo("\nContraintes non satisfaites:", err=True)
+        for issue in constraint_issues:
+            typer.echo(f"- {issue}", err=True)
 
 
 @app.command("compare")
 def compare(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
-    prices: Annotated[Path, typer.Option("--prices", help="YAML: offers: [...]")],
+    prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
-    list_data = yaml.safe_load(shopping_list.read_text(encoding="utf-8")) or {}
-    items = [ShoppingItem.model_validate(item) for item in list_data.get("items", [])]
+    items = read_shopping_items(shopping_list)
+    raw_offers = load_offers(prices) if prices is not None else load_price_cache(data_dir).offers
     comparison = normalize_compare_by(compare_by)
+    items, offers, constraints = prepare_items_and_offers(items, raw_offers, data_dir)
+    brand_preferences = load_brand_preferences(data_dir)
+    echo_basket_options(
+        items,
+        offers,
+        max_stores=max_stores,
+        compare_by=comparison,
+        brand_preferences=brand_preferences,
+    )
     recommendation = recommend_basket(
         items,
-        load_offers(prices),
+        offers,
         mode=mode,
         max_stores=max_stores,
         compare_by=comparison,
+        brand_preferences=brand_preferences,
     )
 
     echo_recommendation(
@@ -1290,3 +1976,10 @@ def compare(
         reason=recommendation.reason,
         compare_by=comparison,
     )
+    constraint_issues = validate_recommendation_constraints(
+        recommendation.total, len(recommendation.by_item), constraints
+    )
+    if constraint_issues:
+        typer.echo("\nContraintes non satisfaites:", err=True)
+        for issue in constraint_issues:
+            typer.echo(f"- {issue}", err=True)
