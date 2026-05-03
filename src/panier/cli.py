@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -18,14 +19,31 @@ from panier.brands import (
     save_brand_preferences,
 )
 from panier.cart import (
+    AUCHAN_CART_ADD_EVAL_JS,
+    AUCHAN_CART_REMOVE_EVAL_JS,
     CART_ADD_EVAL_JS,
+    CART_REMOVE_EVAL_JS,
     CartLine,
+    CartRun,
     cart_items_b64_param,
     cart_items_json_param,
     cart_lines_from_recommendation,
+    cart_run_path,
+    cart_status_expression,
+    cart_sync_diff,
+    load_cart_run,
+    new_cart_run_id,
+    save_cart_run,
+    store_cart_url,
+    store_search_url,
 )
 from panier.catalog import ProductCatalog, load_catalog
-from panier.constraints import BasketConstraints, load_constraints, save_constraints
+from panier.constraints import (
+    BasketConstraints,
+    constraints_path,
+    load_constraints,
+    save_constraints,
+)
 from panier.deterministic import NO_LLM_ENV_VAR, explain_item, no_llm_status
 from panier.drive import (
     best_offer_for_item,
@@ -71,6 +89,8 @@ app = typer.Typer(
     help="Planifie repas et courses optimisées multi-drive.",
     invoke_without_command=True,
 )
+
+OutputFormat = Annotated[str, typer.Option("--format", help="Format de sortie: text ou json")]
 profile_app = typer.Typer(help="Gérer le profil alimentaire.")
 recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
 pantry_app = typer.Typer(help="Gérer le stock local.")
@@ -83,6 +103,7 @@ cache_app = typer.Typer(help="Gérer le cache local des prix/offres.")
 substitution_app = typer.Typer(help="Gérer les substitutions déterministes d'articles.")
 constraint_app = typer.Typer(help="Gérer les contraintes panier déterministes.")
 doctor_app = typer.Typer(help="Diagnostiquer la configuration déterministe locale.")
+cart_app = typer.Typer(help="Relire, synchroniser et appliquer des runs panier drive.")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
@@ -95,6 +116,7 @@ app.add_typer(cache_app, name="cache")
 app.add_typer(substitution_app, name="substitution")
 app.add_typer(constraint_app, name="constraint")
 app.add_typer(doctor_app, name="doctor")
+app.add_typer(cart_app, name="cart")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -283,6 +305,13 @@ def cart_flow_name_for_drive(drive: str) -> str:
     raise typer.BadParameter(f"Drive non supporté pour ajout panier : {drive}")
 
 
+def cart_remove_flow_name_for_drive(drive: str) -> str:
+    normalized = normalize_name(drive)
+    if normalized in {"auchan", "leclerc"}:
+        return f"remove-cart-{normalized}"
+    raise typer.BadParameter(f"Drive non supporté pour suppression panier : {drive}")
+
+
 def _cart_add_expression(line: CartLine, *, dry_run: bool) -> str:
     payload = {
         "item": line.item,
@@ -291,6 +320,18 @@ def _cart_add_expression(line: CartLine, *, dry_run: bool) -> str:
         "dryRun": dry_run,
     }
     return f"({CART_ADD_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+
+
+def _cart_remove_expression(store: str, line: CartLine, *, dry_run: bool) -> str:
+    payload = {
+        "item": line.item,
+        "product": line.product,
+        "quantity": line.quantity,
+        "dryRun": dry_run,
+    }
+    if normalize_name(store) == "auchan":
+        return f"({AUCHAN_CART_REMOVE_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+    return f"({CART_REMOVE_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
 
 
 def _flow_payload_from_line_results(
@@ -384,7 +425,19 @@ def run_cart_flow_for_store(
         fallback_result: dict | None = None
         for target_url in target_urls:
             browser.navigate(target_url)
-            raw_result = browser.console_eval(_cart_add_expression(line, dry_run=False)).data
+            if normalize_name(store) == "auchan":
+                payload = {
+                    "item": line.item,
+                    "product": line.product,
+                    "quantity": line.quantity,
+                    "dryRun": False,
+                }
+                expression = (
+                    f"({AUCHAN_CART_ADD_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+                )
+            else:
+                expression = _cart_add_expression(line, dry_run=False)
+            raw_result = browser.console_eval(expression).data
             value = raw_result.get("result", {}).get("value", raw_result)
             line_result = value if isinstance(value, dict) else {"raw": value}
             if (
@@ -403,15 +456,123 @@ def run_cart_flow_for_store(
     )
 
 
-def echo_cart_plan(grouped_lines: dict[str, list[CartLine]]) -> None:
-    typer.echo("\nPaniers à préparer:")
+def _remove_payload_from_line_results(
+    store: str, lines: list[CartLine], line_results: list[dict], *, dry_run: bool
+) -> dict:
+    found = []
+    removable = []
+    removed = []
+    for line, result in zip(lines, line_results, strict=False):
+        entry = {
+            "item": line.item,
+            "product": line.product,
+            "url": result.get("url") or line.url or line.search_url,
+            "button_label": result.get("button_label") or "",
+        }
+        if result.get("error"):
+            entry["error"] = result.get("error")
+        if result.get("catalog_found"):
+            found.append({**entry, "status": "catalog_found"})
+        if result.get("removable"):
+            removable.append({**entry, "status": "removable"})
+        if result.get("removed"):
+            removed.append({**entry, "status": "removed"})
+    return {
+        "ok": True,
+        "store": store,
+        "dryRun": dry_run,
+        "catalog_found": found,
+        "removable": removable,
+        "removed": removed,
+        "line_results": line_results,
+        "message": (
+            f"Dry-run {store}: lignes panier inspectées, aucun retrait exécuté."
+            if dry_run
+            else f"Live {store}: suppressions panier exécutées; aucun paiement/commande."
+        ),
+    }
+
+
+def run_cart_remove_flow_for_store(
+    store: str,
+    lines: list[CartLine],
+    *,
+    profile: str,
+    browser_command: str | None,
+    dry_run: bool,
+) -> BrowserCommandResult:
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=managed_browser_profile_for_drive(profile, store),
+        site=store,
+    )
+    if dry_run:
+        return browser.flow_run(
+            cart_remove_flow_name_for_drive(store),
+            params={
+                "itemsB64": cart_items_b64_param(lines),
+                "itemsJson": cart_items_json_param(lines),
+                "dryRunB64": "dHJ1ZQ==",
+            },
+            max_side_effect_level="read_only",
+        )
+    line_results: list[dict] = []
+    if not lines:
+        return BrowserCommandResult(
+            action="flow",
+            data=_remove_payload_from_line_results(store, lines, [], dry_run=False),
+        )
+    browser.checkpoint(f"before-live-cart-{store}-remove")
+    for line in lines:
+        target_urls = [url for url in [line.url, line.search_url] if url]
+        if not target_urls:
+            line_results.append(
+                {
+                    "item": line.item,
+                    "product": line.product,
+                    "catalog_found": False,
+                    "removable": False,
+                    "removed": False,
+                    "error": "aucune URL produit/recherche disponible",
+                }
+            )
+            continue
+        fallback_result: dict | None = None
+        for target_url in target_urls:
+            browser.navigate(target_url)
+            raw_result = browser.console_eval(
+                _cart_remove_expression(store, line, dry_run=False)
+            ).data
+            value = raw_result.get("result", {}).get("value", raw_result)
+            line_result = value if isinstance(value, dict) else {"raw": value}
+            if (
+                line_result.get("catalog_found")
+                or line_result.get("removable")
+                or line_result.get("removed")
+            ):
+                line_results.append(line_result)
+                break
+            fallback_result = line_result
+        else:
+            line_results.append(fallback_result or {"error": "aucun résultat navigateur"})
+    return BrowserCommandResult(
+        action="flow",
+        data=_remove_payload_from_line_results(store, lines, line_results, dry_run=False),
+    )
+
+
+def echo_cart_plan(grouped_lines: dict[str, list[CartLine]], *, action: str = "add") -> None:
+    if action == "remove":
+        title = "\nPaniers à retirer:"
+        note = "offre collectée; présence/retrait panier à vérifier"
+    else:
+        title = "\nPaniers à préparer:"
+        note = "offre collectée; disponibilité/ajout panier à vérifier"
+    typer.echo(title)
     for store, lines in grouped_lines.items():
         typer.echo(f"- {store}:")
         for line in lines:
-            typer.echo(
-                f"  - {line.product} x{line.quantity} ({line.item}) — "
-                "offre collectée; disponibilité/ajout panier à vérifier"
-            )
+            typer.echo(f"  - {line.product} x{line.quantity} ({line.item}) — {note}")
 
 
 def cart_flow_value(result: BrowserCommandResult) -> dict:
@@ -430,24 +591,45 @@ def cart_flow_value(result: BrowserCommandResult) -> dict:
     return nested
 
 
-def echo_cart_flow_result(store: str, result: BrowserCommandResult, *, dry_run: bool) -> None:
+def _cart_result_counts(value: dict, action: str) -> dict[str, int]:
+    catalog_found = (
+        value.get("catalog_found") if isinstance(value.get("catalog_found"), list) else []
+    )
+    if action == "remove":
+        available = value.get("removable") if isinstance(value.get("removable"), list) else []
+        done = value.get("removed") if isinstance(value.get("removed"), list) else []
+    else:
+        available = value.get("addable") if isinstance(value.get("addable"), list) else []
+        done = value.get("inserted") if isinstance(value.get("inserted"), list) else []
+    return {"catalog_found": len(catalog_found), "available": len(available), "done": len(done)}
+
+
+def echo_cart_flow_result(
+    store: str, result: BrowserCommandResult, *, dry_run: bool, action: str = "add"
+) -> None:
     value = cart_flow_value(result)
     suffix = "dry-run" if dry_run else "live"
     catalog_found = (
         value.get("catalog_found") if isinstance(value.get("catalog_found"), list) else []
     )
-    addable = value.get("addable") if isinstance(value.get("addable"), list) else []
-    inserted = value.get("inserted") if isinstance(value.get("inserted"), list) else []
+    if action == "remove":
+        available = value.get("removable") if isinstance(value.get("removable"), list) else []
+        done = value.get("removed") if isinstance(value.get("removed"), list) else []
+        available_label = "Produits retirables/disponibles"
+        done_label = "Produits effectivement retirés"
+    else:
+        available = value.get("addable") if isinstance(value.get("addable"), list) else []
+        done = value.get("inserted") if isinstance(value.get("inserted"), list) else []
+        available_label = "Produits ajoutables/disponibles"
+        done_label = "Produits effectivement insérés"
     typer.echo(f"Flow panier {store} exécuté ({suffix}).")
     typer.echo(f"  Produits trouvés/catalogue: {len(catalog_found)}")
-    typer.echo(f"  Produits ajoutables/disponibles: {len(addable)}")
-    typer.echo(f"  Produits effectivement insérés: {len(inserted)}")
+    typer.echo(f"  {available_label}: {len(available)}")
+    typer.echo(f"  {done_label}: {len(done)}")
     message = value.get("message")
     if message:
         typer.echo(f"  Note: {message}")
-    line_results = (
-        value.get("line_results") if isinstance(value.get("line_results"), list) else []
-    )
+    line_results = value.get("line_results") if isinstance(value.get("line_results"), list) else []
     blocked = [
         entry for entry in line_results if isinstance(entry, dict) and entry.get("blocked_by")
     ]
@@ -461,6 +643,109 @@ def echo_cart_flow_result(store: str, result: BrowserCommandResult, *, dry_run: 
             "appris/validé pour ce drive.",
             err=True,
         )
+
+
+def _persist_cart_run(
+    data_dir: Path,
+    *,
+    action: str,
+    dry_run: bool,
+    grouped_lines: dict[str, list[CartLine]],
+    results: dict[str, dict],
+) -> Path:
+    created_at = datetime.now(UTC).isoformat(timespec="seconds")
+    run = CartRun(
+        id=new_cart_run_id(),
+        action=action,
+        dry_run=dry_run,
+        grouped_lines=grouped_lines,
+        results=results,
+        created_at=created_at,
+    )
+    return save_cart_run(data_dir, run)
+
+
+def _cart_run_results_summary(run: CartRun) -> dict[str, int]:
+    totals = {"stores": len(run.grouped_lines), "catalog_found": 0, "available": 0, "done": 0}
+    for value in run.results.values():
+        counts = _cart_result_counts(value, run.action)
+        totals["catalog_found"] += counts["catalog_found"]
+        totals["available"] += counts["available"]
+        totals["done"] += counts["done"]
+    return totals
+
+
+def _run_cart_action(
+    action: str,
+    grouped_lines: dict[str, list[CartLine]],
+    *,
+    profile: str,
+    browser_command: str | None,
+    dry_run: bool,
+) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for store, lines in grouped_lines.items():
+        if action == "remove":
+            result = run_cart_remove_flow_for_store(
+                store,
+                lines,
+                profile=profile,
+                browser_command=browser_command,
+                dry_run=dry_run,
+            )
+        else:
+            result = run_cart_flow_for_store(
+                store,
+                lines,
+                profile=profile,
+                browser_command=browser_command,
+                dry_run=dry_run,
+            )
+        echo_cart_flow_result(store, result, dry_run=dry_run, action=action)
+        results[store] = cart_flow_value(result)
+    return results
+
+
+def run_cart_status_for_store(
+    store: str,
+    lines: list[CartLine],
+    *,
+    profile: str,
+    browser_command: str | None,
+) -> dict:
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=managed_browser_profile_for_drive(profile, store),
+        site=store,
+    )
+    cart_url = store_cart_url(store)
+    if not cart_url:
+        raise typer.BadParameter(f"Drive non supporté pour lecture panier : {store}")
+    browser.navigate(cart_url)
+    raw_result = browser.console_eval(cart_status_expression(store, lines)).data
+    value = raw_result.get("result", {}).get("value", raw_result)
+    return value if isinstance(value, dict) else {"raw": value}
+
+
+def _echo_cart_status(store: str, status: dict) -> None:
+    counts = status.get("counts") if isinstance(status.get("counts"), dict) else {}
+    typer.echo(f"État panier {store} (read-only).")
+    typer.echo(f"  URL: {status.get('url', '')}")
+    typer.echo(f"  Attendus: {counts.get('expected', 0)}")
+    typer.echo(f"  Candidats panier: {counts.get('actual_candidates', 0)}")
+    typer.echo(f"  Matchés: {counts.get('matched', 0)}")
+    if status.get("blocked_by"):
+        typer.echo(f"  Blocage: {status.get('blocked_by')}", err=True)
+
+
+def _echo_cart_sync_diff(store: str, diff: dict) -> None:
+    summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
+    typer.echo(f"Diff sync panier {store} (dry-run).")
+    typer.echo(f"  À garder: {summary.get('unchanged_count', 0)}")
+    typer.echo(f"  À ajouter: {summary.get('to_add_count', 0)}")
+    typer.echo(f"  À retirer: {summary.get('to_remove_count', 0)}")
+    typer.echo(f"  Quantités à corriger: {summary.get('to_update_quantity_count', 0)}")
+    typer.echo(f"  Ambigus: {summary.get('ambiguous_count', 0)}")
 
 
 def collect_offers_for_drives(
@@ -507,9 +792,7 @@ def _collect_drive_offers_with_optional_catalog(
     # signature. Keep that backward-compatible while passing catalog to the real
     # implementation when supported.
     if "catalog" in inspect.signature(collect_drive_offers).parameters:
-        return collect_drive_offers(
-            items, drive, browser, max_results=max_results, catalog=catalog
-        )
+        return collect_drive_offers(items, drive, browser, max_results=max_results, catalog=catalog)
     return collect_drive_offers(items, drive, browser, max_results=max_results)
 
 
@@ -551,11 +834,7 @@ def echo_recipe_selection(recipes: list[Recipe], *, show_balance: bool = False) 
 def format_balance_score(score: BalanceScore) -> str:
     positives = ", ".join(score.positives) if score.positives else "aucun signal positif"
     penalties = ", ".join(score.penalties) if score.penalties else "aucune pénalité"
-    return (
-        f"Équilibre: {score.score}/100 ({score.verdict})\n"
-        f"+ {positives}\n"
-        f"- {penalties}"
-    )
+    return f"Équilibre: {score.score}/100 ({score.verdict})\n+ {positives}\n- {penalties}"
 
 
 def echo_items(title: str, items: list[ShoppingItem]) -> None:
@@ -706,6 +985,17 @@ def normalize_compare_by(value: str) -> CompareBy:
     raise typer.BadParameter("compare-by doit être 'price' ou 'unit-price'")
 
 
+def normalize_output_format(value: str) -> str:
+    normalized = normalize_name(value)
+    if normalized not in {"text", "json"}:
+        raise typer.BadParameter("format doit être 'text' ou 'json'")
+    return normalized
+
+
+def echo_json(payload: dict) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
 @app.callback()
 def main(
     version: Annotated[bool, typer.Option("--version", help="Afficher la version.")] = False,
@@ -763,9 +1053,7 @@ def _brand_action_label(action: BrandPreferenceAction) -> str:
     }[action]
 
 
-def _set_brand_preference(
-    action: BrandPreferenceAction, brand: str, data_dir: Path
-) -> None:
+def _set_brand_preference(action: BrandPreferenceAction, brand: str, data_dir: Path) -> None:
     preferences = load_brand_preferences(data_dir)
     normalized = preferences.add(action, brand)
     save_brand_preferences(data_dir, preferences)
@@ -980,24 +1268,205 @@ def constraint_set(
     typer.echo("Contraintes sauvegardées")
 
 
+def _safe_count(load_fn) -> int | None:
+    try:
+        value = load_fn()
+    except Exception:
+        return None
+    if isinstance(value, list):
+        return len(value)
+    items = getattr(value, "items", None)
+    if isinstance(items, list):
+        return len(items)
+    rules = getattr(value, "rules", None)
+    if isinstance(rules, list):
+        return len(rules)
+    offers = getattr(value, "offers", None)
+    if isinstance(offers, list):
+        return len(offers)
+    return None
+
+
+def doctor_status_payload(data_dir: Path) -> dict:
+    llm = no_llm_status(cli_no_llm=current_cli_no_llm())
+    files = {
+        "profile": {
+            "path": str(profile_path(data_dir)),
+            "present": profile_path(data_dir).exists(),
+        },
+        "recipes": {
+            "path": str(recipes_path(data_dir)),
+            "present": recipes_path(data_dir).exists(),
+            "count": _safe_count(lambda: load_recipes(data_dir)),
+        },
+        "pantry": {
+            "path": str(pantry_path(data_dir)),
+            "present": pantry_path(data_dir).exists(),
+            "count": _safe_count(lambda: load_pantry(data_dir)),
+        },
+        "brands": {
+            "path": str(brand_preferences_path(data_dir)),
+            "present": brand_preferences_path(data_dir).exists(),
+        },
+        "substitutions": {
+            "path": str(substitutions_path(data_dir)),
+            "present": substitutions_path(data_dir).exists(),
+            "count": _safe_count(lambda: load_substitutions(data_dir)),
+        },
+        "constraints": {
+            "path": str(constraints_path(data_dir)),
+            "present": constraints_path(data_dir).exists(),
+        },
+        "price_cache": {
+            "path": str(price_cache_path(data_dir)),
+            "present": price_cache_path(data_dir).exists(),
+        },
+    }
+    next_actions: list[str] = []
+    if not files["profile"]["present"]:
+        next_actions.append("panier profile init")
+    if not files["recipes"]["present"]:
+        next_actions.append("panier recipe add <recette.yaml>")
+    if not files["pantry"]["present"]:
+        next_actions.append("panier pantry init")
+    if not files["price_cache"]["present"]:
+        next_actions.append("panier drive collect <liste.yaml> --output <offers.yaml>")
+    return {
+        "mode": llm.mode,
+        "llm_allowed": not llm.no_llm,
+        "llm_source": llm.source,
+        "data_dir": str(data_dir),
+        "files": files,
+        "critical_path": "règles locales + fichiers YAML + tie-breaks stables",
+        "next_actions": next_actions,
+    }
+
+
+@doctor_app.command("status")
+def doctor_status(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    payload = doctor_status_payload(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json(payload)
+        return
+    typer.echo("Diagnostic Panier")
+    typer.echo(f"Mode: {payload['mode']}")
+    typer.echo(f"LLM autorisé: {'oui' if payload['llm_allowed'] else 'non'}")
+    for label, info in payload["files"].items():
+        count = info.get("count")
+        count_suffix = f" ({count})" if count is not None else ""
+        typer.echo(
+            f"{label}: {'présent' if info['present'] else 'absent'}{count_suffix} — {info['path']}"
+        )
+    typer.echo(f"Chemin critique: {payload['critical_path']}")
+    if payload["next_actions"]:
+        typer.echo("Prochaines actions:")
+        for action in payload["next_actions"]:
+            typer.echo(f"- {action}")
+
+
 @doctor_app.command("determinism")
 def doctor_determinism(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    status = no_llm_status(cli_no_llm=current_cli_no_llm())
+    payload = doctor_status_payload(data_dir)
     typer.echo("Diagnostic déterminisme Panier")
-    typer.echo(f"Mode: {status.mode}")
-    typer.echo(f"LLM autorisé: {'non' if status.no_llm else 'oui'}")
-    for label, path in (
-        ("profil", profile_path(data_dir)),
-        ("recettes", recipes_path(data_dir)),
-        ("stock", pantry_path(data_dir)),
-        ("marques", brand_preferences_path(data_dir)),
-        ("substitutions", substitutions_path(data_dir)),
-        ("cache prix", price_cache_path(data_dir)),
-    ):
-        typer.echo(f"{label}: {'présent' if path.exists() else 'absent'} — {path}")
-    typer.echo("Chemin critique: règles locales + fichiers YAML + tie-breaks stables")
+    typer.echo(f"Mode: {payload['mode']}")
+    typer.echo(f"LLM autorisé: {'oui' if payload['llm_allowed'] else 'non'}")
+    label_map = {
+        "profile": "profil",
+        "recipes": "recettes",
+        "pantry": "stock",
+        "brands": "marques",
+        "substitutions": "substitutions",
+        "price_cache": "cache prix",
+    }
+    for key, label in label_map.items():
+        info = payload["files"][key]
+        typer.echo(f"{label}: {'présent' if info['present'] else 'absent'} — {info['path']}")
+    typer.echo(f"Chemin critique: {payload['critical_path']}")
+
+
+@app.command("init")
+def init_project(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    force: Annotated[bool, typer.Option("--force", help="Réécrire les fichiers starter.")] = False,
+) -> None:
+    typer.echo("Initialisation Panier")
+    profile = profile_path(data_dir)
+    recipes = recipes_path(data_dir)
+    pantry = pantry_path(data_dir)
+    constraints = constraints_path(data_dir)
+    starter_recipes = [
+        Recipe(
+            name="Bowl riz thon",
+            servings=1,
+            prep_minutes=10,
+            cost_level="budget",
+            tags=["rapide", "budget"],
+            ingredients=[
+                Ingredient(name="riz", quantity=150, unit="g"),
+                Ingredient(name="thon", quantity=1, unit="boîte"),
+                Ingredient(name="tomates", quantity=2, unit="pièce"),
+            ],
+        )
+    ]
+    targets: list[tuple[Path, object]] = [
+        (profile, FoodProfile()),
+        (recipes, [recipe.model_dump(mode="json") for recipe in starter_recipes]),
+        (pantry, Pantry()),
+        (constraints, BasketConstraints()),
+    ]
+    for path, payload in targets:
+        if path.exists() and not force:
+            typer.echo(f"déjà présent: {path}")
+            continue
+        if isinstance(payload, list):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
+            )
+        else:
+            dump_yaml(path, payload)
+        typer.echo(f"créé: {path}")
+    typer.echo("Suite: panier doctor status puis panier plan --data-dir <dir>")
+
+
+@doctor_app.command("drive")
+def doctor_drive(
+    store: Annotated[str, typer.Argument(help="Drive à diagnostiquer: leclerc ou auchan")],
+    profile: Annotated[str, typer.Option("--profile")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+) -> None:
+    normalized = normalize_name(store)
+    browser = ManagedBrowserClient(
+        command=browser_command,
+        profile=managed_browser_profile_for_drive(profile, normalized),
+        site=normalized,
+    )
+    url = store_search_url(normalized, "riz")
+    typer.echo(f"Diagnostic drive {normalized}")
+    typer.echo(f"Profil Managed Browser: {managed_browser_profile_for_drive(profile, normalized)}")
+    typer.echo(f"URL test: {url}")
+    try:
+        if url:
+            browser.navigate(url)
+        status = run_cart_status_for_store(
+            normalized,
+            [CartLine(store=normalized, item="riz", product="riz", search_url=url)],
+            profile=profile,
+            browser_command=browser_command,
+        )
+    except ManagedBrowserError as exc:
+        typer.echo(f"Managed Browser indisponible: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    _echo_cart_status(normalized, status)
+    if normalized == "leclerc" and status.get("blocked_by"):
+        typer.echo(
+            "Leclerc: session/drive bloqué par anti-bot; ajout panier live non validable.", err=True
+        )
 
 
 @profile_app.command("init")
@@ -1117,8 +1586,6 @@ def profile_like(
     if action != "add":
         raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
     add_preference("likes", value, data_dir)
-
-
 
 
 @profile_app.command("accept-recipe")
@@ -1443,8 +1910,7 @@ def recipe_list(
     min_balance_score: Annotated[
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
-    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
-    = False,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")] = False,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -1616,8 +2082,7 @@ def recipe_suggest(
     min_balance_score: Annotated[
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
-    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
-    = False,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")] = False,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -1670,13 +2135,19 @@ def plan(
     min_balance_score: Annotated[
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
-    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")]
-    = False,
+    balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")] = False,
     add_to_cart: Annotated[
         bool,
         typer.Option(
             "--add-to-cart",
             help="Préparer les paniers drive avec les produits recommandés.",
+        ),
+    ] = False,
+    remove_from_cart: Annotated[
+        bool,
+        typer.Option(
+            "--remove-from-cart",
+            help="Retirer du panier les produits recommandés déjà présents.",
         ),
     ] = False,
     cart_dry_run: Annotated[
@@ -1797,22 +2268,192 @@ def plan(
         typer.echo("\nContraintes non satisfaites:", err=True)
         for issue in constraint_issues:
             typer.echo(f"- {issue}", err=True)
-    if add_to_cart:
+    if add_to_cart and remove_from_cart:
+        raise typer.BadParameter(
+            "Choisis soit --add-to-cart soit --remove-from-cart, pas les deux."
+        )
+    if add_to_cart or remove_from_cart:
         grouped_lines = cart_lines_from_recommendation(recommendation.by_item)
-        echo_cart_plan(grouped_lines)
+        action = "remove" if remove_from_cart else "add"
+        echo_cart_plan(grouped_lines, action=action)
+        results: dict[str, dict] = {}
         for store, lines in grouped_lines.items():
             try:
-                result = run_cart_flow_for_store(
-                    store,
-                    lines,
+                store_results = _run_cart_action(
+                    action,
+                    {store: lines},
                     profile=profile,
                     browser_command=browser_command,
                     dry_run=cart_dry_run,
                 )
             except ManagedBrowserError as exc:
-                typer.echo(f"Ajout panier {store} indisponible: {exc}", err=True)
+                operation = "Suppression panier" if remove_from_cart else "Ajout panier"
+                typer.echo(f"{operation} {store} indisponible: {exc}", err=True)
                 continue
-            echo_cart_flow_result(store, result, dry_run=cart_dry_run)
+            results.update(store_results)
+        run_path = _persist_cart_run(
+            data_dir,
+            action=action,
+            dry_run=cart_dry_run,
+            grouped_lines=grouped_lines,
+            results=results,
+        )
+        typer.echo(f"Run panier sauvegardé: {run_path}")
+
+
+@cart_app.command("status")
+def cart_status(
+    run_id: Annotated[
+        str,
+        typer.Option("--run", help="ID du run panier à relire, ou latest."),
+    ] = "latest",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    profile: Annotated[str, typer.Option("--profile")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    browser: Annotated[
+        bool,
+        typer.Option("--browser/--no-browser", help="Lire aussi l'état réel via Managed Browser."),
+    ] = False,
+    output_format: OutputFormat = "text",
+) -> None:
+    try:
+        run = load_cart_run(data_dir, run_id)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    summary = _cart_run_results_summary(run)
+    if normalize_output_format(output_format) == "json" and not browser:
+        echo_json(
+            {
+                "id": run.id,
+                "action": run.action,
+                "dry_run": run.dry_run,
+                "created_at": run.created_at,
+                "summary": summary,
+                "file": str(cart_run_path(data_dir, run.id)),
+                "grouped_lines": {
+                    store: [
+                        line.model_dump() if hasattr(line, "model_dump") else line.__dict__
+                        for line in lines
+                    ]
+                    for store, lines in run.grouped_lines.items()
+                },
+                "results": run.results,
+            }
+        )
+        return
+    typer.echo(f"Dernier run panier: {run.id}")
+    typer.echo(f"  Action: {run.action}")
+    typer.echo(f"  Mode: {'dry-run' if run.dry_run else 'live'}")
+    typer.echo(f"  Stores: {summary['stores']}")
+    typer.echo(f"  Produits trouvés/catalogue: {summary['catalog_found']}")
+    label = "retirables/disponibles" if run.action == "remove" else "ajoutables/disponibles"
+    done = "retirés" if run.action == "remove" else "insérés"
+    typer.echo(f"  Produits {label}: {summary['available']}")
+    typer.echo(f"  Produits effectivement {done}: {summary['done']}")
+    typer.echo(f"  Fichier: {cart_run_path(data_dir, run.id)}")
+    if not browser:
+        return
+    for store, lines in run.grouped_lines.items():
+        status = run_cart_status_for_store(
+            store, lines, profile=profile, browser_command=browser_command
+        )
+        _echo_cart_status(store, status)
+
+
+@cart_app.command("add")
+def cart_add(
+    run_id: Annotated[str, typer.Option("--run", help="ID du run panier à appliquer.")] = "latest",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    profile: Annotated[str, typer.Option("--profile")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    cart_dry_run: Annotated[bool, typer.Option("--cart-dry-run/--cart-live")] = True,
+) -> None:
+    try:
+        run = load_cart_run(data_dir, run_id)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if run.action == "remove":
+        raise typer.BadParameter("ce run est une suppression; relance cart add avec un run d'ajout")
+    echo_cart_plan(run.grouped_lines, action="add")
+    results = _run_cart_action(
+        "add",
+        run.grouped_lines,
+        profile=profile,
+        browser_command=browser_command,
+        dry_run=cart_dry_run,
+    )
+    path = _persist_cart_run(
+        data_dir,
+        action="add",
+        dry_run=cart_dry_run,
+        grouped_lines=run.grouped_lines,
+        results=results,
+    )
+    typer.echo(f"Run panier sauvegardé: {path}")
+
+
+@cart_app.command("remove")
+def cart_remove(
+    run_id: Annotated[str, typer.Option("--run", help="ID du run panier à appliquer.")] = "latest",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    profile: Annotated[str, typer.Option("--profile")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    cart_dry_run: Annotated[bool, typer.Option("--cart-dry-run/--cart-live")] = True,
+) -> None:
+    try:
+        run = load_cart_run(data_dir, run_id)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if run.action == "add":
+        raise typer.BadParameter(
+            "ce run est un ajout; relance cart remove avec un run de suppression"
+        )
+    echo_cart_plan(run.grouped_lines, action="remove")
+    results = _run_cart_action(
+        "remove",
+        run.grouped_lines,
+        profile=profile,
+        browser_command=browser_command,
+        dry_run=cart_dry_run,
+    )
+    path = _persist_cart_run(
+        data_dir,
+        action="remove",
+        dry_run=cart_dry_run,
+        grouped_lines=run.grouped_lines,
+        results=results,
+    )
+    typer.echo(f"Run panier sauvegardé: {path}")
+
+
+@cart_app.command("sync")
+def cart_sync(
+    run_id: Annotated[
+        str, typer.Option("--run", help="ID du run panier à synchroniser.")
+    ] = "latest",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    profile: Annotated[str, typer.Option("--profile")] = "courses",
+    browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply", help="Réservé: le sync reste dry-run tant que le diff n'est pas confirmé."
+        ),
+    ] = False,
+) -> None:
+    if apply:
+        raise typer.BadParameter(
+            "cart sync est en dry-run uniquement; "
+            "utilise cart add/remove --cart-live après vérification."
+        )
+    run = load_cart_run(data_dir, run_id)
+    for store, lines in run.grouped_lines.items():
+        status = run_cart_status_for_store(
+            store, lines, profile=profile, browser_command=browser_command
+        )
+        _echo_cart_status(store, status)
+        diff = cart_sync_diff(store, lines, status)
+        _echo_cart_sync_diff(store, diff)
 
 
 @app.command("week")

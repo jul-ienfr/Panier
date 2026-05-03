@@ -1,16 +1,25 @@
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
 import panier.cli as cli
 from panier.brands import BrandPreferences, load_brand_preferences
 from panier.cart import (
+    CART_STATUS_EVAL_JS,
     CartLine,
     cart_items_param,
     cart_lines_from_recommendation,
+    cart_run_path,
+    cart_sync_diff,
+    load_cart_run,
+    new_cart_run_id,
+    store_cart_url,
     store_search_url,
 )
 from panier.cli import app, managed_browser_profile_for_drive
@@ -844,9 +853,7 @@ def test_recipe_score_cli_explains_balance(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(
-        app, ["recipe", "score", "bowl test", "--data-dir", str(tmp_path)]
-    )
+    result = CliRunner().invoke(app, ["recipe", "score", "bowl test", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0
     assert "Équilibre: 80/100 (équilibré)" in result.output
@@ -1498,7 +1505,8 @@ def test_collect_drive_offers_extracts_normalized_prices_from_browser_page() -> 
     assert calls[1][calls[1].index("--tab-id") + 1] == "tab-riz"
 
 
-def test_collect_drive_offers_keeps_leclerc_visible_order() -> None:
+def test_collect_drive_offers_sorts_leclerc_by_unit_price_after_equivalence_filter() -> None:
+    calls: list[list[str]] = []
     payloads = [
         {"tabId": "tab-emmental"},
         {
@@ -1528,6 +1536,7 @@ def test_collect_drive_offers_keeps_leclerc_visible_order() -> None:
     def fake_runner(
         args: list[str], *, input_text: str | None = None
     ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
         return subprocess.CompletedProcess(
             args=args, returncode=0, stdout=json.dumps(payloads.pop(0))
         )
@@ -1539,9 +1548,164 @@ def test_collect_drive_offers_keeps_leclerc_visible_order() -> None:
     offers = collect_drive_offers([ShoppingItem(name="emmental")], "leclerc", client, max_results=2)
 
     assert [offer.product for offer in offers] == [
-        "Emmental Président 400g",
         "Emmental fromage rapé Les Croisés - 1kg",
+        "Emmental Président 400g",
     ]
+    assert calls[0][calls[0].index("--url") + 1].endswith("TexteRecherche=emmental&tri=2")
+
+
+def test_collect_drive_offers_uses_leclerc_unit_price_sort_for_weighted_items() -> None:
+    calls: list[list[str]] = []
+    payloads = [
+        {"tabId": "tab-carottes"},
+        {
+            "items": [
+                {
+                    "title": "Carottes filière Panier du Primeur - 1kg",
+                    "price": "1,59 €",
+                    "unitPrice": "1,59 € / kg",
+                    "url": "#",
+                }
+            ]
+        },
+    ]
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps(payloads.pop(0))
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="leclerc", runner=fake_runner
+    )
+
+    offers = collect_drive_offers(
+        [ShoppingItem(name="carottes", quantity=1, unit="kg")],
+        "leclerc",
+        client,
+        max_results=1,
+    )
+
+    assert [offer.product for offer in offers] == ["Carottes filière Panier du Primeur - 1kg"]
+    assert calls[0][calls[0].index("--url") + 1].endswith("TexteRecherche=carottes&tri=4")
+
+
+def test_collect_drive_offers_rejects_non_strict_leclerc_substitutions() -> None:
+    payload_by_query = {
+        "quinoa": [
+            {
+                "title": "Duo céréales Comptoir du Grain Quinoa et Boulgour - 400g",
+                "price": "2,05 €",
+                "unitPrice": "5,13 € / kg",
+                "url": "#",
+            },
+            {
+                "title": "Quinoa Céréal Bio Bio repas express 220g",
+                "price": "1,85 €",
+                "unitPrice": "8,41 € / kg",
+                "url": "#",
+            },
+        ],
+        "thon+nature": [
+            {
+                "title": "Thon entier MSC Pêche Océan A l'huile - 104g",
+                "price": "1,20 €",
+                "unitPrice": "11,54 € / kg",
+                "url": "#",
+            },
+            {
+                "title": "Thon entier Pêche Océan Naturel - 93g",
+                "price": "1,39 €",
+                "unitPrice": "14,95 € / kg",
+                "url": "#",
+            },
+        ],
+    }
+    current_query = ""
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal current_query
+        if args[:2] == ["managed-browser", "navigate"]:
+            url = args[args.index("--url") + 1]
+            current_query = url.split("TexteRecherche=", 1)[1].split("&", 1)[0]
+            current_query = "thon+nature" if current_query == "thon" else current_query
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"tabId": current_query})
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"items": payload_by_query[current_query]}),
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="leclerc", runner=fake_runner
+    )
+
+    offers = collect_drive_offers(
+        [ShoppingItem(name="quinoa"), ShoppingItem(name="thon nature")],
+        "leclerc",
+        client,
+        max_results=1,
+        products={"thon nature": DriveProduct(name="thon nature")},
+        catalog=None,
+    )
+
+    assert [offer.product for offer in offers] == [
+        "Quinoa Céréal Bio Bio repas express 220g",
+        "Thon entier Pêche Océan Naturel - 93g",
+    ]
+
+
+def test_collect_drive_offers_drops_strictly_excluded_candidates_when_no_fallback() -> None:
+    payload_by_query = {
+        "thon+nature": [
+            {
+                "title": "Thon entier MSC Pêche Océan A l'huile - 104g",
+                "price": "1,20 €",
+                "unitPrice": "11,54 € / kg",
+                "url": "#",
+            }
+        ],
+    }
+    current_query = ""
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal current_query
+        if args[:2] == ["managed-browser", "navigate"]:
+            url = args[args.index("--url") + 1]
+            current_query = url.split("TexteRecherche=", 1)[1].split("&", 1)[0]
+            current_query = "thon+nature" if current_query == "thon" else current_query
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"tabId": current_query})
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"items": payload_by_query[current_query]}),
+        )
+
+    client = ManagedBrowserClient(
+        command="managed-browser", profile="courses", site="leclerc", runner=fake_runner
+    )
+
+    offers = collect_drive_offers(
+        [ShoppingItem(name="thon nature")],
+        "leclerc",
+        client,
+        max_results=1,
+        products={"thon nature": DriveProduct(name="thon nature")},
+        catalog=None,
+    )
+
+    assert offers == []
 
 
 def test_collect_drive_offers_uses_nested_tab_id_from_managed_browser_navigation() -> None:
@@ -1694,7 +1858,6 @@ else:
     }
 
 
-
 def test_profile_recipe_feedback_prioritizes_accepted_and_hides_rejected(tmp_path: Path) -> None:
     (tmp_path / "recipes.yaml").write_text(
         """
@@ -1837,8 +2000,7 @@ def test_cart_lines_group_recommendation_by_store() -> None:
         )
     ]
     assert (
-        cart_items_param(grouped["leclerc"])
-        == "riz|Riz 1kg|1|https://l/riz|"
+        cart_items_param(grouped["leclerc"]) == "riz|Riz 1kg|1|https://l/riz|"
         "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
         "recherche.aspx?TexteRecherche=Riz+1kg&tri=1|offer_collected"
     )
@@ -1863,23 +2025,25 @@ def test_managed_browser_client_runs_flow_with_params_and_side_effect_policy() -
     )
 
     assert result.data == {"ok": True}
-    assert calls == [[
-        "managed-browser",
-        "flow",
-        "run",
-        "add-cart-leclerc",
-        "--param",
-        "itemsB64=cml6fFJpenwxfA==",
-        "--param",
-        "dryRunB64=dHJ1ZQ==",
-        "--max-side-effect-level",
-        "read_only",
-        "--profile",
-        "courses",
-        "--site",
-        "leclerc",
-        "--json",
-    ]]
+    assert calls == [
+        [
+            "managed-browser",
+            "flow",
+            "run",
+            "add-cart-leclerc",
+            "--param",
+            "itemsB64=cml6fFJpenwxfA==",
+            "--param",
+            "dryRunB64=dHJ1ZQ==",
+            "--max-side-effect-level",
+            "read_only",
+            "--profile",
+            "courses",
+            "--site",
+            "leclerc",
+            "--json",
+        ]
+    ]
 
 
 def test_cart_lines_use_live_leclerc_drive_search_url_even_when_offer_url_is_blocked() -> None:
@@ -1923,7 +2087,7 @@ def test_run_cart_flow_live_navigates_and_clicks_without_flow_replay(monkeypatch
             )
         if "console" in args:
             expression = args[args.index("--expression") + 1]
-            assert "dryRun\": false" in expression
+            assert 'dryRun": false' in expression
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -1980,6 +2144,73 @@ def test_run_cart_flow_live_navigates_and_clicks_without_flow_replay(monkeypatch
     assert all("flow" not in call for call in calls)
 
 
+def test_run_cart_flow_live_uses_auchan_specific_add_expression(monkeypatch) -> None:
+    expressions: list[str] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if "storage" in args and "checkpoint" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "navigate" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "console" in args:
+            expression = args[args.index("--expression") + 1]
+            expressions.append(expression)
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "value": {
+                                "catalog_found": True,
+                                "addable": True,
+                                "inserted": True,
+                                "url": "https://www.auchan.fr/recherche?text=tomates",
+                                "button_label": (
+                                    "Ajouter 1 quantité de Tomates rondes prix bas 1kg au panier"
+                                ),
+                            }
+                        }
+                    }
+                ),
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}")
+
+    def fake_init(self, **kwargs):
+        self.command = kwargs.get("command")
+        self.profile = kwargs.get("profile", "courses-auchan")
+        self.site = kwargs.get("site", "auchan")
+        self.runner = fake_runner
+
+    monkeypatch.setattr(cli.ManagedBrowserClient, "__init__", fake_init)
+    result = cli.run_cart_flow_for_store(
+        "auchan",
+        [
+            CartLine(
+                store="auchan",
+                item="tomates",
+                product="Tomates rondes prix bas",
+                search_url="https://www.auchan.fr/recherche?text=tomates",
+            )
+        ],
+        profile="courses",
+        browser_command="managed-browser",
+        dry_run=False,
+    )
+
+    assert len(result.data["inserted"]) == 1
+    assert expressions
+    assert ".product-thumbnail" in expressions[0]
+    assert "Supprimer" not in expressions[0]
+    assert "Tomates rondes prix bas" in expressions[0]
+
+
 def test_run_cart_flow_live_falls_back_from_offer_url_to_search_url(monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -2008,7 +2239,9 @@ def test_run_cart_flow_live_falls_back_from_offer_url_to_search_url(monkeypatch)
                                 "catalog_found": found,
                                 "addable": found,
                                 "inserted": found,
-                                "url": "https://leclerc/search" if found else "https://leclerc/blocked",
+                                "url": "https://leclerc/search"
+                                if found
+                                else "https://leclerc/blocked",
                                 "button_label": "Ajouter au panier" if found else "",
                             }
                         }
@@ -2047,6 +2280,78 @@ def test_run_cart_flow_live_falls_back_from_offer_url_to_search_url(monkeypatch)
     navigate_urls = [call[call.index("--url") + 1] for call in calls if "navigate" in call]
     assert navigate_urls == ["https://leclerc/blocked", "https://leclerc/search"]
     assert all("flow" not in call for call in calls)
+
+
+def test_run_cart_remove_flow_live_uses_auchan_specific_remove_expression(monkeypatch) -> None:
+    expressions: list[str] = []
+    calls: list[list[str]] = []
+
+    def fake_runner(
+        args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "storage" in args and "checkpoint" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "navigate" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps({"ok": True})
+            )
+        if "console" in args:
+            expression = args[args.index("--expression") + 1]
+            expressions.append(expression)
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "value": {
+                                "catalog_found": True,
+                                "removable": True,
+                                "removed": True,
+                                "url": "https://www.auchan.fr/recherche?text=tomates",
+                                "button_label": (
+                                    "Supprimer 1 quantité de Tomates rondes prix bas 1kg du panier"
+                                ),
+                            }
+                        }
+                    }
+                ),
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}")
+
+    def fake_init(self, **kwargs):
+        self.command = kwargs.get("command")
+        self.profile = kwargs.get("profile", "courses-auchan")
+        self.site = kwargs.get("site", "auchan")
+        self.runner = fake_runner
+
+    monkeypatch.setattr(cli.ManagedBrowserClient, "__init__", fake_init)
+    result = cli.run_cart_remove_flow_for_store(
+        "auchan",
+        [
+            CartLine(
+                store="auchan",
+                item="tomates",
+                product="Tomates rondes prix bas",
+                search_url="https://www.auchan.fr/recherche?text=tomates",
+            )
+        ],
+        profile="courses",
+        browser_command="managed-browser",
+        dry_run=False,
+    )
+
+    assert len(result.data["removed"]) == 1
+    assert expressions
+    assert ".product-thumbnail" in expressions[0]
+    assert "Ajouter" not in expressions[0]
+    assert "Tomates rondes prix bas" in expressions[0]
+    assert "before-live-cart-auchan-remove" in calls[0]
+    assert all("flow" not in call for call in calls)
+
 
 def test_plan_add_to_cart_runs_store_flows_in_dry_run(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "recipes.yaml").write_text(
@@ -2166,3 +2471,509 @@ offers:
             True,
         ),
     ]
+
+
+def test_plan_remove_from_cart_runs_remove_flows_in_dry_run(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: test tomates
+  ingredients:
+    - name: tomates
+  tags: [budget]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile.yaml").write_text("{}\n", encoding="utf-8")
+    prices = tmp_path / "prices.yaml"
+    prices.write_text(
+        """
+offers:
+  - store: auchan
+    item: tomates
+    product: Tomates Auchan
+    price: 1.0
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, list[CartLine], bool]] = []
+
+    def fake_run_cart_remove_flow_for_store(store, lines, *, profile, browser_command, dry_run):
+        calls.append((store, lines, dry_run))
+        return cli.BrowserCommandResult(
+            action="flow",
+            data={
+                "ok": True,
+                "catalog_found": [{"product": line.product} for line in lines],
+                "removable": [],
+                "removed": [],
+                "message": f"Dry-run remove {store}",
+            },
+        )
+
+    monkeypatch.setattr(cli, "run_cart_remove_flow_for_store", fake_run_cart_remove_flow_for_store)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "plan",
+            "--data-dir",
+            str(tmp_path),
+            "--prices",
+            str(prices),
+            "--no-pantry",
+            "--remove-from-cart",
+            "--cart-dry-run",
+            "--mode",
+            "simple",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Paniers à retirer:" in result.output
+    assert "Produits trouvés/catalogue: 1" in result.output
+    assert "Produits retirables/disponibles: 0" in result.output
+    assert "Produits effectivement retirés: 0" in result.output
+    assert calls == [
+        (
+            "auchan",
+            [
+                CartLine(
+                    store="auchan",
+                    item="tomates",
+                    product="Tomates Auchan",
+                    quantity=1,
+                    url=None,
+                    search_url="https://www.auchan.fr/recherche?text=Tomates+Auchan",
+                )
+            ],
+            True,
+        ),
+    ]
+
+
+def test_cart_status_expression_is_read_only() -> None:
+    forbidden = [".click(", ".submit(", "fetch(", "XMLHttpRequest", "localStorage.setItem"]
+    for token in forbidden:
+        assert token not in CART_STATUS_EVAL_JS
+    assert "read_only_cart_status" in CART_STATUS_EVAL_JS
+
+
+def test_cart_sync_diff_classifies_keep_add_remove_and_quantity() -> None:
+    desired = [
+        CartLine(store="auchan", item="riz", product="Riz basmati", quantity=1),
+        CartLine(store="auchan", item="lait", product="Lait demi écrémé", quantity=2),
+        CartLine(store="auchan", item="tomates", product="Tomates", quantity=1),
+    ]
+    status = {
+        "url": "https://www.auchan.fr/panier",
+        "actual_lines": [
+            {"title": "Riz basmati", "quantity": 1},
+            {"title": "Lait demi écrémé", "quantity": 1},
+            {"title": "Chips", "quantity": 1},
+        ],
+        "expected_matches": [
+            {
+                "expected_index": 0,
+                "matched": True,
+                "confidence": "high",
+                "actual_index": 0,
+                "actual_quantity": 1,
+            },
+            {
+                "expected_index": 1,
+                "matched": True,
+                "confidence": "high",
+                "actual_index": 1,
+                "actual_quantity": 1,
+            },
+            {"expected_index": 2, "matched": False, "confidence": "none", "actual_index": None},
+        ],
+    }
+    diff = cart_sync_diff("auchan", desired, status)
+    assert diff["summary"] == {
+        "desired_count": 3,
+        "actual_count": 3,
+        "to_add_count": 1,
+        "to_remove_count": 1,
+        "to_update_quantity_count": 1,
+        "unchanged_count": 1,
+        "ambiguous_count": 0,
+        "blocked": False,
+    }
+    assert [operation["op"] for operation in diff["operations"]] == [
+        "keep",
+        "update_quantity",
+        "add",
+        "remove",
+    ]
+
+
+def test_plan_add_to_cart_persists_cart_run(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "recipes.yaml").write_text(
+        """
+- name: test riz
+  ingredients:
+    - name: riz
+  tags: [budget]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile.yaml").write_text("{}\n", encoding="utf-8")
+    prices = tmp_path / "prices.yaml"
+    prices.write_text(
+        """
+offers:
+  - store: auchan
+    item: riz
+    product: Riz Auchan
+    price: 1.0
+""",
+        encoding="utf-8",
+    )
+
+    def fake_run_cart_flow_for_store(store, lines, *, profile, browser_command, dry_run):
+        return cli.BrowserCommandResult(
+            action="flow",
+            data={
+                "ok": True,
+                "catalog_found": [{"product": line.product} for line in lines],
+                "addable": [],
+                "inserted": [],
+                "message": f"Dry-run {store}",
+            },
+        )
+
+    monkeypatch.setattr(cli, "run_cart_flow_for_store", fake_run_cart_flow_for_store)
+    result = CliRunner().invoke(
+        app,
+        [
+            "plan",
+            "--data-dir",
+            str(tmp_path),
+            "--prices",
+            str(prices),
+            "--no-pantry",
+            "--add-to-cart",
+            "--cart-dry-run",
+            "--mode",
+            "simple",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Run panier sauvegardé:" in result.output
+    latest = (tmp_path / "runs" / "latest.txt").read_text(encoding="utf-8").strip()
+    payload = yaml.safe_load((tmp_path / "runs" / f"{latest}.yaml").read_text(encoding="utf-8"))
+    assert payload["action"] == "add"
+    assert payload["dry_run"] is True
+    assert payload["grouped_lines"]["auchan"][0]["product"] == "Riz Auchan"
+    assert payload["results"]["auchan"]["catalog_found"] == [{"product": "Riz Auchan"}]
+
+
+def test_cart_status_reads_persisted_run(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "latest.txt").write_text("cart-test\n", encoding="utf-8")
+    (runs / "cart-test.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "cart-test",
+                "action": "remove",
+                "dry_run": True,
+                "created_at": "now",
+                "grouped_lines": {
+                    "auchan": [
+                        {
+                            "store": "auchan",
+                            "item": "riz",
+                            "product": "Riz Auchan",
+                            "quantity": 1,
+                            "status": "offer_collected",
+                        }
+                    ]
+                },
+                "results": {
+                    "auchan": {
+                        "catalog_found": [{"product": "Riz Auchan"}],
+                        "removable": [],
+                        "removed": [],
+                    }
+                },
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(app, ["cart", "status", "--data-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "Dernier run panier: cart-test" in result.output
+    assert "Action: remove" in result.output
+    assert "Produits trouvés/catalogue: 1" in result.output
+    assert "Produits effectivement retirés: 0" in result.output
+
+
+def test_cart_sync_prints_read_only_diff(tmp_path: Path, monkeypatch) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "latest.txt").write_text("cart-sync\n", encoding="utf-8")
+    (runs / "cart-sync.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "cart-sync",
+                "action": "add",
+                "dry_run": True,
+                "created_at": "now",
+                "grouped_lines": {
+                    "auchan": [
+                        {
+                            "store": "auchan",
+                            "item": "riz",
+                            "product": "Riz Auchan",
+                            "quantity": 1,
+                            "status": "offer_collected",
+                            "search_url": "https://www.auchan.fr/recherche?text=Riz+Auchan",
+                        }
+                    ]
+                },
+                "results": {},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_status(store, lines, *, profile, browser_command):
+        assert store == "auchan"
+        return {
+            "url": "https://www.auchan.fr/panier",
+            "counts": {"expected": 1, "actual_candidates": 0, "matched": 0},
+            "actual_lines": [],
+            "expected_matches": [{"expected_index": 0, "matched": False, "confidence": "none"}],
+        }
+
+    monkeypatch.setattr(cli, "run_cart_status_for_store", fake_status)
+    result = CliRunner().invoke(app, ["cart", "sync", "--data-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "État panier auchan (read-only)." in result.output
+    assert "Diff sync panier auchan (dry-run)." in result.output
+    assert "À ajouter: 1" in result.output
+
+
+def test_doctor_status_reports_json_summary(tmp_path: Path) -> None:
+    (tmp_path / "profile.yaml").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "recipes.yaml").write_text(
+        "- name: Riz test\n  ingredients:\n    - name: riz\n", encoding="utf-8"
+    )
+    (tmp_path / "pantry.yaml").write_text("items:\n  - name: riz\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app, ["doctor", "status", "--data-dir", str(tmp_path), "--format", "json"]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["mode"] == "deterministic-first"
+    assert payload["files"]["profile"]["present"] is True
+    assert payload["files"]["recipes"]["count"] == 1
+    assert payload["files"]["pantry"]["count"] == 1
+    assert payload["next_actions"]
+
+
+def test_init_creates_deterministic_starter_files_idempotently(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    first = runner.invoke(app, ["init", "--data-dir", str(tmp_path)])
+    second = runner.invoke(app, ["init", "--data-dir", str(tmp_path)])
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert "Initialisation Panier" in first.output
+    assert "déjà présent" in second.output
+    assert (tmp_path / "profile.yaml").exists()
+    assert (tmp_path / "recipes.yaml").exists()
+    assert (tmp_path / "pantry.yaml").exists()
+    assert "Bowl riz thon" in (tmp_path / "recipes.yaml").read_text(encoding="utf-8")
+
+
+def test_cart_status_can_output_json(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "latest.txt").write_text("cart-json\n", encoding="utf-8")
+    (runs / "cart-json.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "cart-json",
+                "action": "add",
+                "dry_run": True,
+                "created_at": "now",
+                "grouped_lines": {
+                    "auchan": [
+                        {
+                            "store": "auchan",
+                            "item": "riz",
+                            "product": "Riz Auchan",
+                            "quantity": 1,
+                            "status": "offer_collected",
+                        }
+                    ]
+                },
+                "results": {
+                    "auchan": {
+                        "catalog_found": [{"product": "Riz Auchan"}],
+                        "addable": [{"product": "Riz Auchan"}],
+                        "inserted": [],
+                    }
+                },
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app, ["cart", "status", "--data-dir", str(tmp_path), "--format", "json"]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["id"] == "cart-json"
+    assert payload["summary"] == {
+        "stores": 1,
+        "catalog_found": 1,
+        "available": 1,
+        "done": 0,
+    }
+
+
+def test_python_module_entrypoint_shows_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "panier", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONPATH": "src"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Planifie repas" in result.stdout
+
+
+def test_cart_run_id_rejects_path_traversal(tmp_path: Path) -> None:
+    try:
+        cart_run_path(tmp_path, "../outside")
+    except ValueError as exc:
+        assert "invalide" in str(exc) or "hors dossier" in str(exc)
+    else:
+        raise AssertionError("path traversal run id should be rejected")
+
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "latest.txt").write_text("../outside\n", encoding="utf-8")
+
+    try:
+        load_cart_run(tmp_path)
+    except FileNotFoundError as exc:
+        assert "run panier" in str(exc)
+    else:
+        raise AssertionError("latest path traversal run id should be rejected")
+
+
+def test_new_cart_run_id_is_unique_and_safe() -> None:
+    ids = {new_cart_run_id() for _ in range(20)}
+
+    assert len(ids) == 20
+    assert all("/" not in run_id and ".." not in run_id for run_id in ids)
+
+
+def test_cart_status_uses_store_cart_url(monkeypatch) -> None:
+    navigated: list[str] = []
+
+    class FakeBrowser:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def navigate(self, url: str):
+            navigated.append(url)
+
+        def console_eval(self, expression: str):
+            class Result:
+                data = {"result": {"value": {"url": "cart", "counts": {}}}}
+
+            return Result()
+
+    monkeypatch.setattr(cli, "ManagedBrowserClient", FakeBrowser)
+
+    status = cli.run_cart_status_for_store(
+        "leclerc",
+        [
+            CartLine(
+                store="leclerc",
+                item="riz",
+                product="Riz",
+                search_url=store_search_url("leclerc", "riz"),
+            )
+        ],
+        profile="courses",
+        browser_command=None,
+    )
+
+    assert navigated == [store_cart_url("leclerc")]
+    assert status["url"] == "cart"
+
+
+def test_cart_run_path_rejects_path_traversal(tmp_path: Path) -> None:
+    from panier.cart import cart_run_path, load_cart_run
+
+    for bad in ["../secret", "subdir/run", "", "latest/../x"]:
+        with pytest.raises(ValueError):
+            cart_run_path(tmp_path, bad)
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "latest.txt").write_text("../secret\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        load_cart_run(tmp_path, "latest")
+
+
+def test_cart_add_remove_reject_opposite_run_action(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from panier.cart import CartRun, save_cart_run
+
+    data_dir = tmp_path / "data"
+    save_cart_run(
+        data_dir,
+        CartRun(
+            id="cart-remove-run",
+            action="remove",
+            dry_run=True,
+            grouped_lines={},
+            results={},
+            created_at="now",
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["cart", "add", "--data-dir", str(data_dir), "--run", "cart-remove-run"]
+    )
+    assert result.exit_code != 0
+    assert "ce run est une suppression" in result.output
+
+    save_cart_run(
+        data_dir,
+        CartRun(
+            id="cart-add-run",
+            action="add",
+            dry_run=True,
+            grouped_lines={},
+            results={},
+            created_at="now",
+        ),
+    )
+    result = runner.invoke(
+        cli.app, ["cart", "remove", "--data-dir", str(data_dir), "--run", "cart-add-run"]
+    )
+    assert result.exit_code != 0
+    assert "ce run est un ajout" in result.output

@@ -239,12 +239,16 @@ def _resolution_confidence(status: ResolutionStatus) -> str:
     }.get(status, "low")
 
 
-def drive_search_url(drive_name: str, query: str) -> str:
-    template = _DRIVE_SEARCH_URLS.get(normalize_name(drive_name))
+def drive_search_url(drive_name: str, query: str, *, tri: int | None = None) -> str:
+    normalized_drive = normalize_name(drive_name)
+    template = _DRIVE_SEARCH_URLS.get(normalized_drive)
     encoded = quote_plus(query)
     if template is None:
         return f"https://www.google.com/search?q={quote_plus(f'{drive_name} drive {query}')}"
-    return template.format(query=encoded)
+    url = template.format(query=encoded)
+    if normalized_drive == "leclerc" and tri is not None:
+        url = re.sub(r"([?&])tri=\d+", rf"\g<1>tri={tri}", url)
+    return url
 
 
 def open_drive_searches(
@@ -273,7 +277,12 @@ def collect_drive_offers(
     """Ouvre les recherches drive puis extrait les premières offres visibles."""
     offers: list[StoreOffer] = []
     for entry in build_drive_search_plan(items, drive_name, products, catalog):
-        url = drive_search_url(drive_name, entry.query)
+        normalized_drive = normalize_name(drive_name)
+        url = drive_search_url(
+            drive_name,
+            entry.query,
+            tri=_leclerc_sort_for_item(entry.item) if normalized_drive == "leclerc" else None,
+        )
         browser_result = browser.navigate(url)
         search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
         tab_id = _browser_tab_id(browser_result.data)
@@ -286,18 +295,7 @@ def collect_drive_offers(
             offer = _offer_from_browser_item(search.entry.item, drive_name, raw)
             if offer is not None:
                 item_offers.append(offer)
-        if normalize_name(drive_name) == "leclerc":
-            offers.extend(item_offers[:max_results])
-            continue
-        scored = sorted(
-            (score_offer(search.entry.item, offer) for offer in item_offers),
-            key=lambda offer_score: (
-                offer_score.score,
-                -(offer_score.offer.unit_price or offer_score.offer.price),
-                -offer_score.offer.price,
-            ),
-            reverse=True,
-        )
+        scored = _strict_sorted_offers(search.entry.item, item_offers)
         offers.extend(score.offer for score in scored[:max_results])
     return offers
 
@@ -319,17 +317,10 @@ def best_offer_for_item(
     item: ShoppingItem, offers: list[StoreOffer], compare_by: str = "price"
 ) -> OfferScore | None:
     """Choisit l'offre la plus pertinente pour une ligne de courses."""
-    scored = [score_offer(item, offer) for offer in offers if offer.item == item.name]
-    if not scored:
-        return None
-    return max(
-        scored,
-        key=lambda scored_offer: (
-            scored_offer.score,
-            -_offer_compare_value(scored_offer.offer, compare_by),
-            -scored_offer.offer.price,
-        ),
+    scored = _strict_sorted_offers(
+        item, [offer for offer in offers if offer.item == item.name], compare_by
     )
+    return scored[0] if scored else None
 
 
 def score_offer(
@@ -360,6 +351,82 @@ def _offer_compare_value(offer: StoreOffer, compare_by: str) -> float:
     if compare_by == "unit_price" and offer.unit_price is not None:
         return float(offer.unit_price)
     return float(offer.price)
+
+
+def _strict_sorted_offers(
+    item: ShoppingItem, offers: list[StoreOffer], compare_by: str = "unit_price"
+) -> list[OfferScore]:
+    scored = [score_offer(item, offer) for offer in offers]
+    hard_allowed = [
+        score
+        for score in scored
+        if not _violates_strict_exclusions(
+            normalize_name(item.name), normalize_name(score.offer.product)
+        )
+    ]
+    eligible = [
+        score for score in hard_allowed if _is_strict_equivalent(item, score.offer, score.score)
+    ]
+    if not eligible:
+        eligible = hard_allowed
+    return sorted(
+        eligible,
+        key=lambda offer_score: (
+            _offer_compare_value(offer_score.offer, compare_by),
+            float(offer_score.offer.price),
+            -offer_score.score,
+            offer_score.offer.product,
+        ),
+    )
+
+
+def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -> bool:
+    item_name = normalize_name(item.name)
+    product_name = normalize_name(offer.product)
+    if _violates_strict_exclusions(item_name, product_name):
+        return False
+    item_tokens = set(_tokens(item_name))
+    product_tokens = set(_tokens(product_name))
+    if not item_tokens:
+        return score >= 0.5
+    required = _strict_required_tokens(item_tokens)
+    if not required.issubset(product_tokens):
+        return False
+    return score >= 0.1 or item_name in product_name
+
+
+def _strict_required_tokens(tokens: set[str]) -> set[str]:
+    required = set(tokens)
+    if "nature" in required:
+        required.remove("nature")
+    return required
+
+
+def _violates_strict_exclusions(item_name: str, product_name: str) -> bool:
+    exclusion_by_item = {
+        "quinoa": {"boulgour", "ble", "lentilles", "carottes", "duo", "melange", "mélange"},
+        "thon": {"huile"},
+    }
+    product_tokens = set(_tokens(product_name))
+    product_text = normalize_name(product_name)
+    for item_token, excluded_tokens in exclusion_by_item.items():
+        if item_token in item_name and (
+            product_tokens & excluded_tokens
+            or any(excluded in product_text for excluded in excluded_tokens)
+        ):
+            return True
+    if "nature" in item_name and "thon" in item_name and "huile" in product_text:
+        return True
+    return False
+
+
+def _leclerc_sort_for_item(item: ShoppingItem) -> int:
+    # Leclerc: tri=4 => prix/kg/L croissant, tri=2 => prix croissant.
+    # Le matching strict côté Panier reste la vraie barrière anti-substitution ;
+    # le tri ne sert qu'à faire remonter les candidats les moins chers ensuite.
+    if item.unit and normalize_name(item.unit) in {"kg", "g", "l", "cl", "ml"}:
+        return 4
+    return 2
 
 
 def _offer_from_browser_item(

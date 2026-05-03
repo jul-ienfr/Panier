@@ -24,6 +24,10 @@ pip install -e '.[dev]'
 ## Exemples
 
 ```bash
+panier init
+panier doctor status
+panier doctor status --format json
+python -m panier --help
 panier profile init
 panier profile dislike add oignons
 panier profile allergy add arachides
@@ -58,6 +62,18 @@ panier recipe suggest --meals 3
 panier week
 panier compare examples/shopping-list.yaml --prices examples/prices.yaml --max-stores 2
 ```
+
+### Onboarding / diagnostic
+
+```bash
+panier init                         # crée profil, recettes starter, stock et contraintes si absents
+panier doctor status                # résumé humain de la config locale
+panier doctor status --format json  # sortie stable pour scripts/CI
+panier doctor determinism           # vue compat sur le chemin déterministe critique
+```
+
+`panier init` est idempotent : il ne réécrit pas les fichiers existants sans `--force`.
+Le package expose aussi `python -m panier`, utile pour les smoke tests en environnement `src/` ou editable install.
 
 ### Drive / produits
 
@@ -175,6 +191,23 @@ Concrètement :
 - les requêtes drive sont générées par règles explicites (`build_drive_search_plan`) : nom canonique, marque commune, marque distributeur uniquement sur le drive compatible, sinon requête générique ;
 - la comparaison panier trie les magasins et choisit une solution stable en cas d'égalité (un seul drive avant un split équivalent, puis noms de drives triés) ;
 - sans `--collect`, Panier ne doit pas ouvrir de navigateur, appeler le réseau ou dépendre d'un LLM : les prix fournis localement sont la seule source d'offres.
+
+### Runs panier / cart
+
+Quand `plan` prépare une action panier, le run est sauvegardé sous `~/.panier/runs/` avec `latest.txt` :
+
+```bash
+panier plan --prices offers.yaml --add-to-cart --cart-dry-run
+panier cart status
+panier cart status --format json
+panier cart status --no-browser      # relit seulement le dernier run persistant
+panier cart sync                     # compare en lecture seule; `sync` réel reste dry-run
+panier cart add --run latest         # dry-run par défaut
+panier cart add --run latest --cart-live
+panier cart remove --run latest --cart-dry-run
+```
+
+La séparation est volontaire : `plan` décide le panier cible, `cart status` relit l'audit, `cart sync` compare en lecture seule, puis `cart add/remove --cart-live` est l'étape explicite à effet réel.
 
 ## Déterminisme et garde-fou LLM
 
