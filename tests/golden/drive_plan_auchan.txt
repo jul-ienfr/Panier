@@ -1,0 +1,13 @@
+Liste drive:
+- pâtes 250 g
+- thon 1 boîte
+- emmental râpé 140 g
+- riz 100 g
+- tomates 2 pièce
+
+Recherches à lancer:
+- pâtes 250 g -> pâtes (medium)
+- thon 1 boîte -> thon albacore (high)
+- emmental râpé 140 g -> emmental râpé entremont (exact)
+- riz 100 g -> riz (low)
+- tomates 2 pièce -> tomates (low)

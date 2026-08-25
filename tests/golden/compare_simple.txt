@@ -1,0 +1,19 @@
+
+Comparatif paniers:
+- Tout auchan: 10.10 €
+- Tout leclerc: 11.40 €
+- Hybride auchan + leclerc: 9.80 €
+
+Recommandation achat:
+Type: panier simple — commander dans un seul drive
+Mode: simple
+Drives: auchan
+Total: 10.10 €
+Raison: Panier simple sur un seul drive.
+
+Détail achat:
+- pâtes 250 g: Pâtes Penne Auchan 1kg — auchan — 1.50 € (exact)
+- thon 1 boîte: Thon albacore Auchan x4 — auchan — 3.20 € (exact)
+- emmental râpé 140 g: Emmental râpé Auchan 200g — auchan — 2.00 € (exact)
+- riz 100 g: Riz basmati Auchan 1kg — auchan — 2.10 € (exact)
+- tomates 2 pièce: Tomates rondes Auchan 1kg — auchan — 1.30 € (exact)
