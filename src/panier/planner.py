@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import random
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Literal
 
@@ -127,10 +128,9 @@ def _recipe_prep_sort_value(recipe: Recipe) -> int:
     return recipe.prep_minutes if recipe.prep_minutes is not None else 10**9
 
 
-def select_meals(
+def rank_recipes(
     recipes: list[Recipe],
     profile: FoodProfile,
-    meals: int,
     *,
     include_tags: set[str] | None = None,
     exclude_tags: set[str] | None = None,
@@ -138,6 +138,7 @@ def select_meals(
     cost_level: str | None = None,
     min_balance_score: int | None = None,
 ) -> list[Recipe]:
+    """Classement déterministe complet (filtrage puis score, tie-breaks stables)."""
     compatible = compatible_recipes(recipes, profile)
     compatible = filter_recipes(
         compatible,
@@ -160,7 +161,7 @@ def select_meals(
         )
         for recipe in compatible
     ]
-    ranked = [
+    return [
         recipe
         for recipe, _ in sorted(
             scored,
@@ -171,7 +172,28 @@ def select_meals(
             ),
         )
     ]
-    return ranked[:meals]
+
+
+def select_meals(
+    recipes: list[Recipe],
+    profile: FoodProfile,
+    meals: int,
+    *,
+    include_tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
+    max_prep_minutes: int | None = None,
+    cost_level: str | None = None,
+    min_balance_score: int | None = None,
+) -> list[Recipe]:
+    return rank_recipes(
+        recipes,
+        profile,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+        max_prep_minutes=max_prep_minutes,
+        cost_level=cost_level,
+        min_balance_score=min_balance_score,
+    )[:meals]
 
 
 def consolidate_ingredients(recipes: list[Recipe]) -> list[ShoppingItem]:
@@ -638,3 +660,123 @@ def _offer_compare_value(offer: StoreOffer, compare_by: CompareBy) -> float:
     if compare_by == "unit_price" and offer.unit_price is not None:
         return float(offer.unit_price)
     return float(offer.price)
+
+
+_WEEK_SLOT_CANONICAL = {
+    "dej": "dej",
+    "dejeuner": "dej",
+    "diner": "diner",
+    "dîner": "diner",
+}
+
+WEEK_SLOT_LABELS = {"dej": "déj", "diner": "dîner"}
+
+
+@dataclass(frozen=True)
+class WeekAssignment:
+    day: int
+    slot: str
+    recipe: Recipe
+
+
+@dataclass(frozen=True)
+class WeekPlan:
+    assignments: list[WeekAssignment] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def recipes_in_order(self) -> list[Recipe]:
+        """Recettes dans l'ordre d'affectation (répétees selon leurs comptages)."""
+        return [assignment.recipe for assignment in self.assignments]
+
+
+def canonical_week_slots(slots: list[str]) -> list[str]:
+    """Normalise et valide les slots ; retourne la séquence canonique."""
+    canonical: list[str] = []
+    for slot in slots:
+        key = normalize_name(slot)
+        if key not in _WEEK_SLOT_CANONICAL:
+            raise ValueError(f"slot inconnu : {slot} (attendus: dej, diner)")
+        canonical.append(_WEEK_SLOT_CANONICAL[key])
+    if not canonical:
+        raise ValueError("au moins un slot est requis")
+    return canonical
+
+
+def build_week_plan(
+    ranked_recipes: list[Recipe],
+    *,
+    days: int,
+    slots: list[str],
+    max_repeats_per_week: int = 2,
+    shuffle_seed: int | None = None,
+) -> WeekPlan:
+    """Remplit une grille jour/slot de façon déterministe.
+
+    - passe 1 : une recette distincte par slot, dans l'ordre du classement ;
+    - passe 2 (pool épuisé) : réutilisation en priorisant les recettes taguées
+      `batch` (cuisiner une fois, manger plusieurs fois), dans la limite de
+      `max_repeats_per_week` ;
+    - `shuffle_seed` est la seule source de variabilité (explicitement demandée).
+    """
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    if max_repeats_per_week < 1:
+        raise ValueError("max_repeats_per_week must be >= 1")
+    canonical_slots = canonical_week_slots(slots)
+
+    pool = list(ranked_recipes)
+    if shuffle_seed is not None:
+        random.Random(shuffle_seed).shuffle(pool)
+    rank_index = {normalize_name(recipe.name): index for index, recipe in enumerate(ranked_recipes)}
+
+    def is_batch(recipe: Recipe) -> bool:
+        return "batch" in {normalize_name(tag) for tag in recipe.tags}
+
+    counts: dict[str, int] = defaultdict(int)
+    assignments: list[WeekAssignment] = []
+    total_slots = days * len(canonical_slots)
+
+    def try_assign(candidate: Recipe, day: int, slot: str) -> bool:
+        key = normalize_name(candidate.name)
+        if counts[key] >= max_repeats_per_week:
+            return False
+        counts[key] += 1
+        assignments.append(WeekAssignment(day=day, slot=slot, recipe=candidate))
+        return True
+
+    grid = [
+        (day, slot)
+        for day in range(1, days + 1)
+        for slot in canonical_slots
+    ]
+
+    # Passe 1 : recettes fraîches d'abord.
+    fresh_index = 0
+    for day, slot in grid:
+        if len(assignments) >= total_slots:
+            break
+        while fresh_index < len(pool):
+            candidate = pool[fresh_index]
+            fresh_index += 1
+            if try_assign(candidate, day, slot):
+                break
+
+    # Passe 2 : réutilisation, batch d'abord, puis rang, puis nom.
+    if len(assignments) < total_slots:
+        reuse_pool = sorted(
+            pool,
+            key=lambda recipe: (
+                not is_batch(recipe),
+                rank_index.get(normalize_name(recipe.name), 10**9),
+                normalize_name(recipe.name),
+            ),
+        )
+        for day, slot in grid[len(assignments):]:
+            for candidate in reuse_pool:
+                if try_assign(candidate, day, slot):
+                    break
+
+    return WeekPlan(
+        assignments=assignments,
+        counts={name: count for name, count in sorted(counts.items()) if count},
+    )

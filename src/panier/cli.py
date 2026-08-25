@@ -93,12 +93,16 @@ from panier.offers_cache import (
     save_offers_cache,
 )
 from panier.planner import (
+    WEEK_SLOT_LABELS,
     CompareBy,
+    build_week_plan,
+    canonical_week_slots,
     compare_basket_options,
     consolidate_ingredients,
     consume_pantry,
     filter_recipes,
     low_stock_items,
+    rank_recipes,
     recommend_basket,
     select_meals,
     subtract_pantry,
@@ -3037,30 +3041,110 @@ def week(
             help="Bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    days: Annotated[
+        int | None,
+        typer.Option("--days", min=1, help="Nombre de jours du plan (avec --slots)."),
+    ] = None,
+    slots: Annotated[
+        str | None,
+        typer.Option("--slots", help="Slots par jour, ex: dej,diner"),
+    ] = None,
+    max_repeats_per_week: Annotated[
+        int,
+        typer.Option("--max-repeats-per-week", min=1, help="Répétitions max d'une recette."),
+    ] = 2,
+    shuffle_seed: Annotated[
+        int | None,
+        typer.Option(
+            "--shuffle-seed",
+            help="Graine explicite : seule source de variabilité du plan.",
+        ),
+    ] = None,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
+    try:
+        slot_list = (
+            canonical_week_slots([part.strip() for part in slots.split(",") if part.strip()])
+            if slots
+            else ["diner"]
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    meal_count = (
+        (days or 7) * len(slot_list) if (days is not None or slots is not None) else meals
+    )
+    display_days = -(-meal_count // len(slot_list))
     profile_data = load_profile(data_dir)
-    selected = select_meals(
+    ranked = rank_recipes(
         apply_recipe_feedback_order(load_recipes(data_dir), profile_data),
         profile_data,
-        meals,
         include_tags=parse_csv_set(include_tags),
         exclude_tags=parse_csv_set(exclude_tags),
         max_prep_minutes=max_prep_minutes,
         cost_level=cost_level,
         min_balance_score=min_balance_score,
     )
+    week_plan = build_week_plan(
+        ranked,
+        days=display_days,
+        slots=slot_list,
+        max_repeats_per_week=max_repeats_per_week,
+        shuffle_seed=shuffle_seed,
+    )
+    selected = week_plan.recipes_in_order()
+    unfilled = meal_count - len(selected)
     items = consolidate_ingredients(selected)
     if use_pantry:
         pantry = load_pantry_if_exists(data_dir)
         if pantry is not None:
             items = subtract_pantry(items, pantry)
 
-    typer.echo("Semaine:")
-    for index, recipe in enumerate(selected, start=1):
-        score = score_recipe_balance(recipe)
-        typer.echo(f"{index}. {recipe.name} — équilibre {score.score}/100 ({score.verdict})")
+    typer.echo(f"Semaine: {len(selected)} repas")
+    prices_offers = load_offers(prices) if prices is not None else None
+    costs_by_name: dict[str, RecipeCost] = {}
+    for assignment in week_plan.assignments:
+        score = score_recipe_balance(assignment.recipe)
+        label = WEEK_SLOT_LABELS[assignment.slot]
+        key = normalize_name(assignment.recipe.name)
+        if key not in costs_by_name:
+            costs_by_name[key] = compute_recipe_cost(
+                assignment.recipe, data_dir=data_dir, prices_offers=prices_offers
+            )
+        typer.echo(
+            f"Jour {assignment.day} {label}: {assignment.recipe.name}"
+            f" — équilibre {score.score}/100 ({score.verdict})"
+            f"{_recipe_cost_suffix(costs_by_name[key])}"
+        )
+    if unfilled > 0:
+        typer.echo(
+            f"Attention: {unfilled} slot(s) non pourvu(s) "
+            "(pas assez de recettes compatibles / cap de répétition atteint).",
+            err=True,
+        )
+    priced_totals = [cost.total for cost in costs_by_name.values() if cost.total is not None]
+    repeat_sum = sum(week_plan.counts.values())
+    if len(priced_totals) == len(costs_by_name) and costs_by_name:
+        total_cost = sum(
+            float(costs_by_name[key].total) * count
+            for key, count in week_plan.counts.items()
+        )
+        typer.echo(
+            f"Coût hebdo estimé ({repeat_sum} cuissons): {total_cost:.2f} €"
+        )
+    elif priced_totals:
+        partial = sum(
+            float(costs_by_name[key].total) * count
+            for key, count in week_plan.counts.items()
+            if costs_by_name[key].total is not None
+        )
+        unpriced = sorted(
+            key for key, cost in costs_by_name.items() if cost.total is None
+        )
+        typer.echo(
+            f"Coût hebdo partiel: {partial:.2f} € "
+            f"(coût inconnu pour: {', '.join(unpriced)})"
+        )
     typer.echo("\nÀ acheter:")
     if not items:
         typer.echo("- rien à acheter")
