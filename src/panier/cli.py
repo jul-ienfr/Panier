@@ -58,6 +58,16 @@ from panier.drive import (
     collect_drive_offers,
     open_drive_searches,
 )
+from panier.history_store import (
+    history_db_path,
+    known_brand_names,
+    offers_for_item,
+    parse_since,
+    price_history_payload,
+    promo_candidates,
+    record_offers,
+    trend_for_item,
+)
 from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
@@ -121,6 +131,7 @@ substitution_app = typer.Typer(help="Gérer les substitutions déterministes d'a
 constraint_app = typer.Typer(help="Gérer les contraintes panier déterministes.")
 doctor_app = typer.Typer(help="Diagnostiquer la configuration déterministe locale.")
 cart_app = typer.Typer(help="Relire, synchroniser et appliquer des runs panier drive.")
+history_app = typer.Typer(help="Historique local des prix collectés (informatif).")
 app.add_typer(profile_app, name="profile")
 app.add_typer(recipe_app, name="recipe")
 app.add_typer(pantry_app, name="pantry")
@@ -134,6 +145,7 @@ app.add_typer(substitution_app, name="substitution")
 app.add_typer(constraint_app, name="constraint")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(cart_app, name="cart")
+app.add_typer(history_app, name="history")
 
 DEFAULT_DATA_DIR = Path.home() / ".panier"
 
@@ -805,6 +817,62 @@ def _echo_collect_status(
     )
 
 
+def _record_history(data_dir: Path, drive: str, collected: list[StoreOffer]) -> None:
+    """Alimente l'historique SQLite ; un échec local n'interrompt jamais la collecte."""
+    try:
+        record_offers(data_dir, drive, collected, known_brands=known_brand_names(data_dir))
+    except Exception as exc:
+        typer.echo(f"Avertissement historique {drive}: {exc}", err=True)
+
+
+def echo_price_history_block(
+    recommendation_items: dict[str, StoreOffer],
+    data_dir: Path,
+    *,
+    enabled: bool,
+) -> None:
+    """Bloc strictement informatif : n'influence jamais la recommandation."""
+    if not enabled or not history_db_path(data_dir).exists():
+        return
+    block = price_history_payload(
+        data_dir, [offer.item for offer in recommendation_items.values()]
+    )
+    if not block:
+        return
+    typer.echo("\nHistorique prix (informatif):")
+    for name in sorted(block):
+        info = block[name]
+        delta = (
+            f"{info['delta_pct']:+.1f} %" if info["delta_pct"] is not None else "n/a"
+        )
+        promo = "candidat promo" if info["is_promo_candidate"] else "pas une promo"
+        typer.echo(
+            f"- {name}: dernier {info['last_price']:.2f} € ({delta} vs moyenne; "
+            f"{info['observations']} obs.) — {promo}"
+        )
+
+
+def _enrich_collect_output_with_history(
+    output: Path,
+    recommendation_items: dict[str, StoreOffer],
+    data_dir: Path,
+) -> None:
+    """Ajoute le bloc price_history au payload déjà écrit (--collect-output)."""
+    try:
+        payload = yaml.safe_load(output.read_text(encoding="utf-8")) or {}
+        block = price_history_payload(
+            data_dir, [offer.item for offer in recommendation_items.values()]
+        )
+        if block:
+            payload["price_history"] = block
+            output.write_text(
+                yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        typer.echo(f"Avertissement historique (payload): {exc}", err=True)
+
+
 def collect_offers_for_drives(
     items: list[ShoppingItem],
     drives: list[str],
@@ -921,6 +989,8 @@ def collect_offers_with_cache(
                     "age_s": None,
                     "stale": False,
                 }
+            if data_dir is not None and collected:
+                _record_history(data_dir, drive, collected)
             continue
 
         had_failure = True
@@ -1165,6 +1235,125 @@ def echo_json(payload: dict) -> None:
 
 
 _cli_no_llm = False
+
+
+def _history_since(value: str | None) -> datetime | None:
+    try:
+        return parse_since(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@history_app.command("show")
+def history_show(
+    ingredient: Annotated[str, typer.Argument(help="Nom canonique d'ingrédient")],
+    store: Annotated[str | None, typer.Option("--store")] = None,
+    since: Annotated[str | None, typer.Option("--since", help="Ex: 7d, 24h, date ISO")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    cutoff = _history_since(since)
+    points = offers_for_item(data_dir, ingredient, store=store, since=cutoff)
+    if normalize_output_format(output_format) == "json":
+        echo_json(
+            {
+                "ingredient": normalize_name(ingredient),
+                "points": [point.__dict__ for point in points],
+            }
+        )
+        return
+    if not points:
+        typer.echo(f"Aucun historique pour {normalize_name(ingredient)}")
+        return
+    for point in points:
+        price = f"{point.price:.2f} €"
+        unit_price = f" ({point.unit_price:.2f} €/kg-L)" if point.unit_price else ""
+        brand = f" [{point.brand}]" if point.brand else ""
+        typer.echo(
+            f"- {point.collected_at} {point.store}: {point.product_title}{brand}"
+            f" — {price}{unit_price}"
+        )
+
+
+@history_app.command("trend")
+def history_trend(
+    ingredient: Annotated[str, typer.Argument(help="Nom canonique d'ingrédient")],
+    store: Annotated[str | None, typer.Option("--store")] = None,
+    since: Annotated[str | None, typer.Option("--since", help="Ex: 7d, 24h, date ISO")] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    cutoff = _history_since(since)
+    trend = trend_for_item(data_dir, ingredient, store=store, since=cutoff)
+    if trend is None:
+        typer.echo(f"Aucun historique pour {normalize_name(ingredient)}")
+        return
+    if normalize_output_format(output_format) == "json":
+        echo_json(
+            {
+                "canonical_name": trend.canonical_name,
+                "store": trend.store,
+                "observations": trend.observations,
+                "min_price": trend.min_price,
+                "mean_price": round(trend.mean_price, 4),
+                "median_price": round(trend.median_price, 4),
+                "last_price": trend.last_price,
+                "last_collected_at": trend.last_collected_at,
+                "delta_pct": (
+                    round(trend.delta_pct, 2) if trend.delta_pct is not None else None
+                ),
+                "is_promo_candidate": trend.is_promo_candidate,
+            }
+        )
+        return
+    typer.echo(f"Tendance {trend.canonical_name} ({trend.store}):")
+    typer.echo(f"  Observations: {trend.observations}")
+    typer.echo(f"  Min: {trend.min_price:.2f} €")
+    typer.echo(f"  Moyenne: {trend.mean_price:.2f} €")
+    typer.echo(f"  Médiane: {trend.median_price:.2f} €")
+    typer.echo(f"  Dernier: {trend.last_price:.2f} € ({trend.last_collected_at})")
+    if trend.delta_pct is not None:
+        typer.echo(f"  Variation dernier vs moyenne: {trend.delta_pct:+.1f} %")
+    verdict = "candidat promo" if trend.is_promo_candidate else "pas une promo"
+    typer.echo(f"  Candidat promo: {'oui' if trend.is_promo_candidate else 'non'} ({verdict})")
+
+
+@history_app.command("promos")
+def history_promos(
+    since: Annotated[str | None, typer.Option("--since", help="Ex: 7d (défaut), date ISO")] = "7d",
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    cutoff = _history_since(since)
+    candidates = promo_candidates(data_dir, since=cutoff)
+    if normalize_output_format(output_format) == "json":
+        echo_json(
+            {
+                "candidates": [
+                    {
+                        "canonical_name": trend.canonical_name,
+                        "store": trend.store,
+                        "last_price": trend.last_price,
+                        "median_price": round(trend.median_price, 4),
+                        "delta_pct": (
+                            round(trend.delta_pct, 2) if trend.delta_pct is not None else None
+                        ),
+                    }
+                    for trend in candidates
+                ]
+            }
+        )
+        return
+    if not candidates:
+        typer.echo("Aucun candidat promo détecté")
+        return
+    typer.echo("Candidats promo (prix courant < médiane historique):")
+    for trend in candidates:
+        delta = f"{trend.delta_pct:+.1f} %" if trend.delta_pct is not None else "n/a"
+        typer.echo(
+            f"- {trend.canonical_name} ({trend.store}): {trend.last_price:.2f} € "
+            f"vs médiane {trend.median_price:.2f} € ({delta})"
+        )
 
 
 @app.callback()
@@ -1494,6 +1683,10 @@ def doctor_status_payload(data_dir: Path) -> dict:
         "offers_cache": {
             "path": str(offers_cache_dir(data_dir)),
             "present": offers_cache_dir(data_dir).exists(),
+        },
+        "history_db": {
+            "path": str(history_db_path(data_dir)),
+            "present": history_db_path(data_dir).exists(),
         },
     }
     next_actions: list[str] = []
@@ -2062,6 +2255,8 @@ def drive_collect(
     if update_cache:
         add_offers_to_cache(data_dir, offers)
         typer.echo(f"Cache prix mis à jour: {price_cache_path(data_dir)}")
+    if offers:
+        _record_history(data_dir, drive, offers)
     payload = {"offers": [offer.model_dump(mode="json") for offer in offers]}
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -2351,6 +2546,13 @@ def plan(
             help="Timeout global du cycle de collecte (env PANIER_COLLECT_TIMEOUT_SECONDS).",
         ),
     ] = None,
+    price_history: Annotated[
+        bool,
+        typer.Option(
+            "--price-history/--no-price-history",
+            help="Bloc historique prix informatif si disponible.",
+        ),
+    ] = True,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2469,6 +2671,11 @@ def plan(
         typer.echo("\nContraintes non satisfaites:", err=True)
         for issue in constraint_issues:
             typer.echo(f"- {issue}", err=True)
+    echo_price_history_block(recommendation.by_item, data_dir, enabled=price_history)
+    if collect_output is not None and price_history:
+        _enrich_collect_output_with_history(
+            collect_output, recommendation.by_item, data_dir
+        )
     if add_to_cart and remove_from_cart:
         raise typer.BadParameter(
             "Choisis soit --add-to-cart soit --remove-from-cart, pas les deux."
@@ -2702,6 +2909,13 @@ def week(
             help="Timeout global du cycle de collecte (env PANIER_COLLECT_TIMEOUT_SECONDS).",
         ),
     ] = None,
+    price_history: Annotated[
+        bool,
+        typer.Option(
+            "--price-history/--no-price-history",
+            help="Bloc historique prix informatif si disponible.",
+        ),
+    ] = True,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2817,6 +3031,11 @@ def week(
         typer.echo("\nContraintes non satisfaites:", err=True)
         for issue in constraint_issues:
             typer.echo(f"- {issue}", err=True)
+    echo_price_history_block(recommendation.by_item, data_dir, enabled=price_history)
+    if collect_output is not None and price_history:
+        _enrich_collect_output_with_history(
+            collect_output, recommendation.by_item, data_dir
+        )
 
 
 @app.command("compare")
@@ -2827,6 +3046,13 @@ def compare(
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+    price_history: Annotated[
+        bool,
+        typer.Option(
+            "--price-history/--no-price-history",
+            help="Afficher le bloc historique prix informatif si disponible.",
+        ),
+    ] = True,
 ) -> None:
     items = read_shopping_items(shopping_list)
     raw_offers = load_offers(prices) if prices is not None else load_price_cache(data_dir).offers
@@ -2866,3 +3092,4 @@ def compare(
         typer.echo("\nContraintes non satisfaites:", err=True)
         for issue in constraint_issues:
             typer.echo(f"- {issue}", err=True)
+    echo_price_history_block(recommendation.by_item, data_dir, enabled=price_history)
