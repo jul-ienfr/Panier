@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import yaml
@@ -3726,6 +3726,8 @@ def dashboard(
     cache_entries = list_cache_entries(data_dir)
 
     def store_status(store: str) -> bool:
+        if household is None:
+            return True
         return household.stores.get(normalize_name(store), True)
 
     known_stores = ["auchan", "carrefour", "intermarche", "leclerc"]
@@ -3741,7 +3743,7 @@ def dashboard(
     if latest_file.exists():
         latest_run_id = latest_file.read_text(encoding="utf-8").strip()
 
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "active_household": household.name if household else None,
         "profile_source": (
             f"foyer:{household.name}" if household else str(profile_path(data_dir))
@@ -3750,8 +3752,8 @@ def dashboard(
             "allergies": sorted(profile.allergies),
             "forbidden": sorted(profile.forbidden),
             "dislikes": sorted(
-                f"{value} ({profile.detail_for('dislikes', value).status})"
-                if profile.detail_for("dislikes", value)
+                f"{value} ({detail.status})"
+                if (detail := profile.detail_for("dislikes", value)) is not None
                 else value
                 for value in profile.dislikes
             ),
