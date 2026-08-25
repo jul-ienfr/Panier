@@ -104,6 +104,7 @@ from panier.planner import (
     subtract_pantry,
 )
 from panier.price_cache import add_offers_to_cache, load_price_cache, price_cache_path
+from panier.recipe_cost import RecipeCost, compute_recipe_cost, recipe_cost_sort_key
 from panier.substitutions import (
     SubstitutionCatalog,
     load_substitutions,
@@ -2268,6 +2269,81 @@ def drive_collect(
         typer.echo(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
 
 
+def echo_recipe_cost(cost: RecipeCost) -> None:
+    """Affiche le coût d'une recette ; ingrédients non pricés explicites."""
+    typer.echo(f"Coût {cost.recipe.name} ({cost.recipe.servings} portions):")
+    for entry in cost.costs:
+        if entry.price is None:
+            typer.echo(f"- {entry.name}: unpriced (aucun prix connu)")
+            continue
+        source = f"historique {entry.store}" if entry.source == "history" else entry.store
+        typer.echo(f"- {entry.name}: {entry.price:.2f} € ({source})")
+    if cost.total is not None:
+        typer.echo(f"Total: {cost.total:.2f} €")
+        per = cost.per_servings()
+        if per is not None:
+            typer.echo(f"Coût par portion: {per:.2f} €")
+    else:
+        typer.echo(
+            f"Total partiel: {cost.partial_total:.2f} € "
+            f"({len(cost.unpriced)} article(s) non pricé(s))"
+        )
+
+
+@recipe_app.command("cost")
+def recipe_cost_command(
+    name: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    prices: Annotated[
+        Path | None,
+        typer.Option("--prices", help="YAML prioritaire: offers: [...]"),
+    ] = None,
+    output_format: OutputFormat = "text",
+) -> None:
+    recipe = find_recipe(load_recipes(data_dir), name)
+    offers = load_offers(prices) if prices is not None else None
+    cost = compute_recipe_cost(recipe, data_dir=data_dir, prices_offers=offers)
+    if normalize_output_format(output_format) == "json":
+        echo_json(
+            {
+                "recipe": recipe.name,
+                "servings": recipe.servings,
+                "total": cost.total,
+                "partial_total": cost.partial_total if cost.total is None else None,
+                "unpriced": cost.unpriced,
+                "items": [
+                    {
+                        "name": entry.name,
+                        "price": entry.price,
+                        "source": entry.source,
+                        "store": entry.store,
+                    }
+                    for entry in cost.costs
+                ],
+            }
+        )
+        return
+    echo_recipe_cost(cost)
+
+
+def _sorted_recipes_by_cost(
+    recipes: list, *, data_dir: Path, prices: Path | None
+) -> list:
+    offers = load_offers(prices) if prices is not None else None
+    costs = [
+        compute_recipe_cost(recipe, data_dir=data_dir, prices_offers=offers)
+        for recipe in recipes
+    ]
+    return sorted(costs, key=recipe_cost_sort_key)
+
+
+def _recipe_cost_suffix(cost: RecipeCost) -> str:
+    total = cost.total
+    if total is None:
+        return " — coût inconnu"
+    return f" — {total:.2f} €"
+
+
 @recipe_app.command("list")
 def recipe_list(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
@@ -2280,6 +2356,14 @@ def recipe_list(
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
     balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")] = False,
+    sort_cost: Annotated[
+        bool,
+        typer.Option("--sort-cost", help="Trier par coût croissant (non pricées en dernier)."),
+    ] = False,
+    prices: Annotated[
+        Path | None,
+        typer.Option("--prices", help="YAML prioritaire pour les coûts: offers: [...]"),
+    ] = None,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2296,6 +2380,18 @@ def recipe_list(
     )
     if not recipes:
         typer.echo("Aucune recette")
+        return
+    if sort_cost:
+        costs = _sorted_recipes_by_cost(recipes, data_dir=data_dir, prices=prices)
+        for cost in costs:
+            tags = f" [{', '.join(cost.recipe.tags)}]" if cost.recipe.tags else ""
+            balance = ""
+            if balanced or min_balance_score is not None:
+                score = score_recipe_balance(cost.recipe)
+                balance = f" — équilibre {score.score}/100 ({score.verdict})"
+            typer.echo(
+                f"- {cost.recipe.name}{tags}{balance}{_recipe_cost_suffix(cost)}"
+            )
         return
     for recipe in recipes:
         tags = f" [{', '.join(recipe.tags)}]" if recipe.tags else ""
@@ -2452,12 +2548,35 @@ def recipe_suggest(
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
     balanced: Annotated[bool, typer.Option("--balanced", help="Recettes équilibrées")] = False,
+    max_cost_per_meal: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost-per-meal",
+            min=0.01,
+            help="Exclut les recettes dont le coût connu dépasse ce montant.",
+        ),
+    ] = None,
+    prices: Annotated[
+        Path | None,
+        typer.Option("--prices", help="YAML prioritaire pour les coûts: offers: [...]"),
+    ] = None,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
     profile_data = load_profile(data_dir)
+    recipes = apply_recipe_feedback_order(load_recipes(data_dir), profile_data)
+    offers = load_offers(prices) if prices is not None else None
+    cost_suffix_by_name: dict[str, str] = {}
+    if max_cost_per_meal is not None:
+        affordable: list[Recipe] = []
+        for recipe in recipes:
+            cost = compute_recipe_cost(recipe, data_dir=data_dir, prices_offers=offers)
+            cost_suffix_by_name[normalize_name(recipe.name)] = _recipe_cost_suffix(cost)
+            if cost.total is None or cost.total <= max_cost_per_meal:
+                affordable.append(recipe)
+        recipes = affordable
     selected = select_meals(
-        apply_recipe_feedback_order(load_recipes(data_dir), profile_data),
+        recipes,
         profile_data,
         meals,
         include_tags=parse_csv_set(include_tags),
@@ -2471,6 +2590,8 @@ def recipe_suggest(
         if balanced or min_balance_score is not None:
             score = score_recipe_balance(recipe)
             suffix = f" — équilibre {score.score}/100 ({score.verdict})"
+        if normalize_name(recipe.name) in cost_suffix_by_name:
+            suffix += cost_suffix_by_name[normalize_name(recipe.name)]
         typer.echo(f"- {recipe.name}{suffix}")
 
 
