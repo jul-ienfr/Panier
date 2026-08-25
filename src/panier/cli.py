@@ -60,6 +60,7 @@ from panier.drive import (
 )
 from panier.history_store import (
     history_db_path,
+    history_stats,
     known_brand_names,
     offers_for_item,
     parse_since,
@@ -68,11 +69,27 @@ from panier.history_store import (
     record_offers,
     trend_for_item,
 )
+from panier.household import (
+    HouseholdError,
+    HouseholdProfile,
+    active_household_name,
+    household_path,
+    list_households,
+    load_active_household,
+    load_household,
+    resolve_profile_file,
+    save_household,
+    set_active_household,
+    slugify,
+)
 from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient, ManagedBrowserError
 from panier.models import (
     FoodProfile,
     Ingredient,
     Pantry,
+    PreferenceConfidence,
+    PreferenceDetail,
+    PreferenceStatus,
     PriceMode,
     Recipe,
     ShoppingItem,
@@ -168,10 +185,29 @@ def pantry_path(data_dir: Path) -> Path:
 
 
 def load_profile(data_dir: Path) -> FoodProfile:
+    """Préférences effectives : foyer actif si présent, sinon profile.yaml."""
+    active = load_active_household(data_dir)
+    if active is not None:
+        return active.preferences
     path = profile_path(data_dir)
     if not path.exists():
         return FoodProfile()
     return load_yaml_model(path, FoodProfile)
+
+
+def save_effective_profile(data_dir: Path, profile: FoodProfile) -> Path:
+    """Écrit les préférences là où elles seront relues par load_profile."""
+    active = load_active_household(data_dir)
+    if active is not None:
+        active.preferences = profile
+        return save_household(data_dir, active)
+    path = profile_path(data_dir)
+    dump_yaml(path, profile)
+    return path
+
+
+def load_household_preferences(data_dir: Path) -> HouseholdProfile | None:
+    return load_active_household(data_dir)
 
 
 def load_recipes(data_dir: Path) -> list[Recipe]:
@@ -243,6 +279,13 @@ def prepare_items_and_offers(
 ) -> tuple[list[ShoppingItem], list[StoreOffer], BasketConstraints]:
     substitutions = load_substitutions(data_dir)
     constraints = load_constraints(data_dir)
+    household = load_active_household(data_dir)
+    if household is not None:
+        disabled = household.disabled_stores()
+        blocked = {normalize_name(s) for s in constraints.blocked_stores} | set(disabled)
+        constraints = constraints.model_copy(
+            update={"blocked_stores": sorted(blocked)}
+        )
     expanded_offers = substitute_offers_for_requested_items(items, offers, substitutions)
     filtered_offers = apply_store_constraints(expanded_offers, constraints)
     return items, filtered_offers, constraints
@@ -1657,6 +1700,8 @@ def doctor_status_payload(data_dir: Path) -> dict:
         "profile": {
             "path": str(profile_path(data_dir)),
             "present": profile_path(data_dir).exists(),
+            "effective_path": str(resolve_profile_file(data_dir)),
+            "household": active_household_name(data_dir),
         },
         "recipes": {
             "path": str(recipes_path(data_dir)),
@@ -1846,18 +1891,216 @@ def profile_init(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
-    path = profile_path(data_dir)
+    path = resolve_profile_file(data_dir)
     if path.exists() and not force:
         typer.echo(f"Profil déjà présent : {path}")
         return
-    dump_yaml(path, FoodProfile())
+    save_effective_profile(data_dir, FoodProfile())
     typer.echo(f"Profil créé : {path}")
+
+
+def _echo_household_meta(household: HouseholdProfile) -> None:
+    typer.echo(f"Foyer: {household.name}")
+    if household.display_name:
+        typer.echo(f"  Nom affiché: {household.display_name}")
+    if household.geo_zone:
+        typer.echo(f"  Zone géographique: {household.geo_zone}")
+    enabled = sorted(household.enabled_stores())
+    disabled = sorted(household.disabled_stores())
+    unknown = sorted(set(household.stores) - set(enabled) - set(disabled))
+    if enabled or disabled:
+        parts = []
+        if enabled:
+            parts.append(f"activés: {', '.join(enabled)}")
+        if disabled:
+            parts.append(f"désactivés: {', '.join(disabled)}")
+        suffix = f" (non déclarés: {', '.join(unknown)})" if unknown else ""
+        typer.echo(f"  Magasins {'; '.join(parts)}{suffix}")
+    if household.servings_per_meal is not None:
+        typer.echo(f"  Portions par repas: {household.servings_per_meal}")
+    if household.budget_max_eur is not None:
+        typer.echo(f"  Budget max: {household.budget_max_eur:.2f} €")
+    if household.notes:
+        typer.echo(f"  Notes: {household.notes}")
+
+
+@profile_app.command("create")
+def profile_create(
+    name: Annotated[str, typer.Argument()],
+    display_name: Annotated[str | None, typer.Option("--display-name")] = None,
+    geo_zone: Annotated[str | None, typer.Option("--geo-zone", help="Ville / code postal")] = None,
+    enable_store: Annotated[list[str] | None, typer.Option("--enable-store")] = None,
+    disable_store: Annotated[list[str] | None, typer.Option("--disable-store")] = None,
+    servings_per_meal: Annotated[int | None, typer.Option("--servings", min=1)] = None,
+    budget_max_eur: Annotated[float | None, typer.Option("--budget-max-eur", min=0.01)] = None,
+    notes: Annotated[str | None, typer.Option("--notes")] = None,
+    from_base: Annotated[
+        bool,
+        typer.Option(
+            "--from-base",
+            help="Initialiser les préférences depuis le profile.yaml historique.",
+        ),
+    ] = False,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    path = household_path(data_dir, name)
+    if path.exists():
+        raise typer.BadParameter(f"le foyer existe déjà : {slugify(name)}")
+    preferences = load_profile(data_dir) if from_base else FoodProfile()
+    stores: dict[str, bool] = {}
+    for store in enable_store or []:
+        stores[normalize_name(store)] = True
+    for store in disable_store or []:
+        stores[normalize_name(store)] = False
+    household = HouseholdProfile(
+        name=name,
+        display_name=display_name,
+        geo_zone=geo_zone,
+        stores=stores,
+        servings_per_meal=servings_per_meal,
+        budget_max_eur=budget_max_eur,
+        notes=notes,
+        preferences=preferences,
+    )
+    saved = save_household(data_dir, household)
+    typer.echo(f"Foyer créé : {saved}")
+    _echo_household_meta(household)
+
+
+@profile_app.command("list")
+def profile_list(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    names = list_households(data_dir)
+    active = active_household_name(data_dir)
+    base_path = profile_path(data_dir)
+    typer.echo(
+        f"Base historique: {base_path}"
+        + (" (effective)" if active is None and base_path.exists() else "")
+    )
+    if not names:
+        typer.echo("Aucun foyer nommé (panier profile create <nom>)")
+        return
+    for name in names:
+        marker = " [actif]" if name == active else ""
+        try:
+            household = load_household(data_dir, name)
+            label = household.display_name or ""
+            zone = f" — {household.geo_zone}" if household.geo_zone else ""
+            extra = f" ({label}{zone})" if label or zone else ""
+        except HouseholdError:
+            extra = " (illisible)"
+        typer.echo(f"- {name}{marker}{extra}")
+
+
+@profile_app.command("use")
+def profile_use(
+    name: Annotated[str, typer.Argument()],
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    try:
+        set_active_household(data_dir, name)
+    except HouseholdError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Foyer actif : {slugify(name)}")
+
+
+@profile_app.command("unuse")
+def profile_unuse(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    set_active_household(data_dir, None)
+    typer.echo("Retour au profil de base (profile.yaml)")
+
+
+@profile_app.command("remove")
+def profile_remove(
+    name: Annotated[str, typer.Argument()],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Autoriser la suppression du foyer actif"),
+    ] = False,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    slug = slugify(name)
+    path = household_path(data_dir, name)
+    if not path.exists():
+        raise typer.BadParameter(f"foyer introuvable : {slug}")
+    if active_household_name(data_dir) == slug and not force:
+        raise typer.BadParameter(
+            f"{slug} est le foyer actif ; bascule d'abord (profile use) ou --force."
+        )
+    path.unlink()
+    if active_household_name(data_dir) == slug:
+        set_active_household(data_dir, None)
+    typer.echo(f"Foyer supprimé : {slug}")
+
+
+@profile_app.command("set")
+def profile_set(
+    name: Annotated[
+        str | None,
+        typer.Argument(help="Foyer à modifier (défaut : foyer actif)"),
+    ] = None,
+    display_name: Annotated[str | None, typer.Option("--display-name")] = None,
+    geo_zone: Annotated[str | None, typer.Option("--geo-zone")] = None,
+    enable_store: Annotated[list[str] | None, typer.Option("--enable-store")] = None,
+    disable_store: Annotated[list[str] | None, typer.Option("--disable-store")] = None,
+    servings_per_meal: Annotated[int | None, typer.Option("--servings", min=1)] = None,
+    budget_max_eur: Annotated[float | None, typer.Option("--budget-max-eur", min=0.01)] = None,
+    notes: Annotated[str | None, typer.Option("--notes")] = None,
+    clear_geo: Annotated[bool, typer.Option("--clear-geo-zone")] = False,
+    clear_budget: Annotated[bool, typer.Option("--clear-budget")] = False,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+) -> None:
+    target = name or active_household_name(data_dir)
+    if target is None:
+        raise typer.BadParameter(
+            "aucun foyer actif ; précisez un nom ou activez un foyer (profile use)."
+        )
+    try:
+        household = load_household(data_dir, target)
+    except HouseholdError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    updates: dict[str, object] = {}
+    if display_name is not None:
+        updates["display_name"] = display_name
+    if geo_zone is not None:
+        updates["geo_zone"] = geo_zone
+    if clear_geo:
+        updates["geo_zone"] = None
+    if servings_per_meal is not None:
+        updates["servings_per_meal"] = servings_per_meal
+    if budget_max_eur is not None:
+        updates["budget_max_eur"] = budget_max_eur
+    if clear_budget:
+        updates["budget_max_eur"] = None
+    if notes is not None:
+        updates["notes"] = notes
+    stores = dict(household.stores)
+    for store in enable_store or []:
+        stores[normalize_name(store)] = True
+    for store in disable_store or []:
+        stores[normalize_name(store)] = False
+    if stores != household.stores:
+        updates["stores"] = stores
+    if not updates:
+        typer.echo("Rien à modifier.")
+        return
+    updated = household.model_copy(update=updates)
+    save_household(data_dir, updated)
+    typer.echo(f"Foyer mis à jour : {updated.name}")
+    _echo_household_meta(updated)
 
 
 @profile_app.command("show")
 def profile_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
+    household = load_active_household(data_dir)
+    if household is not None:
+        _echo_household_meta(household)
+        typer.echo("Préférences:")
     typer.echo(
         yaml.safe_dump(
             load_profile(data_dir).model_dump(mode="json"),
@@ -1871,35 +2114,84 @@ def add_preference(kind: str, value: str, data_dir: Path) -> None:
     profile = load_profile(data_dir)
     normalized = normalize_name(value)
     getattr(profile, kind).add(normalized)
-    dump_yaml(profile_path(data_dir), profile)
+    save_effective_profile(data_dir, profile)
     typer.echo(f"Ajouté à {kind}: {normalized}")
 
 
 def preference_label(kind: str) -> str:
     return {
+        "allergies": "allergies",
+        "forbidden": "interdits",
+        "dislikes": "détestés",
+        "likes": "préférés",
         "accepted_recipes": "recettes acceptées",
         "rejected_recipes": "recettes rejetées",
     }.get(kind, kind)
 
 
-def add_profile_value(kind: str, value: str, data_dir: Path) -> None:
+def _preference_confidence(value: str | None) -> PreferenceConfidence:
+    if value is None:
+        return PreferenceConfidence.CONFIRMED
+    try:
+        return PreferenceConfidence(normalize_name(value))
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"confiance invalide : {value} "
+            "(attendues: confirmed, strong, medium, low)"
+        ) from exc
+
+
+def _preference_status(value: str | None) -> PreferenceStatus:
+    if value is None:
+        return PreferenceStatus.PERMANENT
+    normalized = normalize_name(value).replace("_", "-")
+    try:
+        return PreferenceStatus(normalized)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"statut invalide : {value} (attendus: permanent, temporary-context)"
+        ) from exc
+
+
+def set_preference_detail(
+    kind: str,
+    value: str,
+    data_dir: Path,
+    *,
+    reason: str | None = None,
+    confidence: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+) -> None:
     profile = load_profile(data_dir)
     normalized = normalize_name(value)
     getattr(profile, kind).add(normalized)
+    profile.set_detail(
+        kind,
+        PreferenceDetail(
+            value=normalized,
+            reason=reason,
+            confidence=_preference_confidence(confidence),
+            status=_preference_status(status),
+            source=source,
+            since=datetime.now(UTC).date().isoformat(),
+        ),
+    )
     if kind == "accepted_recipes":
         profile.rejected_recipes.discard(normalized)
+        profile.clear_detail("rejected_recipes", normalized)
     elif kind == "rejected_recipes":
         profile.accepted_recipes.discard(normalized)
-    dump_yaml(profile_path(data_dir), profile)
-    typer.echo(f"Ajouté à {preference_label(kind)}: {normalized}")
+        profile.clear_detail("accepted_recipes", normalized)
+    save_effective_profile(data_dir, profile)
 
 
-def remove_profile_value(kind: str, value: str, data_dir: Path) -> None:
+def remove_preference_value(kind: str, value: str, data_dir: Path) -> None:
     profile = load_profile(data_dir)
     normalized = normalize_name(value)
-    values = getattr(profile, kind)
-    values.discard(normalized)
-    dump_yaml(profile_path(data_dir), profile)
+    getattr(profile, kind).discard(normalized)
+    profile.clear_detail(kind, normalized)
+    save_effective_profile(data_dir, profile)
     typer.echo(f"Retiré de {preference_label(kind)}: {normalized}")
 
 
@@ -1916,78 +2208,178 @@ def apply_recipe_feedback_order(recipes: list[Recipe], profile: FoodProfile) -> 
     )
 
 
+def _profile_preference_command(
+    kind: str,
+    action: str,
+    value: str,
+    data_dir: Path,
+    *,
+    reason: str | None = None,
+    confidence: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+) -> None:
+    if action == "add":
+        set_preference_detail(
+            kind,
+            value,
+            data_dir,
+            reason=reason,
+            confidence=confidence,
+            status=status,
+            source=source,
+        )
+        typer.echo(f"Ajouté à {preference_label(kind)}: {normalize_name(value)}")
+        return
+    if action == "remove":
+        remove_preference_value(kind, value, data_dir)
+        return
+    raise typer.BadParameter("Action attendue : add ou remove.")
+
+
 @profile_app.command("allergy")
 def profile_allergy(
-    action: Annotated[str, typer.Argument(help="add")],
+    action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="permanent (défaut) ou temporary-context"),
+    ] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action != "add":
-        raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
-    add_preference("allergies", value, data_dir)
+    _profile_preference_command(
+        "allergies",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        status=status,
+        source=source,
+    )
 
 
 @profile_app.command("dislike")
 def profile_dislike(
-    action: Annotated[str, typer.Argument(help="add")],
+    action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="permanent (défaut) ou temporary-context"),
+    ] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action != "add":
-        raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
-    add_preference("dislikes", value, data_dir)
+    _profile_preference_command(
+        "dislikes",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        status=status,
+        source=source,
+    )
 
 
 @profile_app.command("forbid")
 def profile_forbid(
-    action: Annotated[str, typer.Argument(help="add")],
+    action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="permanent (défaut) ou temporary-context"),
+    ] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action != "add":
-        raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
-    add_preference("forbidden", value, data_dir)
+    _profile_preference_command(
+        "forbidden",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        status=status,
+        source=source,
+    )
 
 
 @profile_app.command("like")
 def profile_like(
-    action: Annotated[str, typer.Argument(help="add")],
+    action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="permanent (défaut) ou temporary-context"),
+    ] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action != "add":
-        raise typer.BadParameter("Seule l'action 'add' existe pour l'instant.")
-    add_preference("likes", value, data_dir)
+    _profile_preference_command(
+        "likes",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        status=status,
+        source=source,
+    )
 
 
 @profile_app.command("accept-recipe")
 def profile_accept_recipe(
     action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action == "add":
-        add_profile_value("accepted_recipes", value, data_dir)
-        return
-    if action == "remove":
-        remove_profile_value("accepted_recipes", value, data_dir)
-        return
-    raise typer.BadParameter("Action attendue : add ou remove.")
+    _profile_preference_command(
+        "accepted_recipes",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        source=source,
+    )
 
 
 @profile_app.command("reject-recipe")
 def profile_reject_recipe(
     action: Annotated[str, typer.Argument(help="add|remove")],
     value: Annotated[str, typer.Argument()],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    confidence: Annotated[str | None, typer.Option("--confidence")] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="permanent (défaut) ou temporary-context"),
+    ] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
 ) -> None:
-    if action == "add":
-        add_profile_value("rejected_recipes", value, data_dir)
-        return
-    if action == "remove":
-        remove_profile_value("rejected_recipes", value, data_dir)
-        return
-    raise typer.BadParameter("Action attendue : add ou remove.")
+    _profile_preference_command(
+        "rejected_recipes",
+        action,
+        value,
+        data_dir,
+        reason=reason,
+        confidence=confidence,
+        status=status,
+        source=source,
+    )
 
 
 @pantry_app.command("init")
@@ -3298,3 +3690,154 @@ def compare(
         for issue in constraint_issues:
             typer.echo(f"- {issue}", err=True)
     echo_price_history_block(recommendation.by_item, data_dir, enabled=price_history)
+
+
+@app.command("dashboard")
+def dashboard(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    promo_since: Annotated[
+        str, typer.Option("--promo-since", help="Fenêtre promos (ex: 7d)")
+    ] = "7d",
+    output_format: OutputFormat = "text",
+) -> None:
+    """Vue d'ensemble : foyer, préférences, magasins, fichiers, historique, cache."""
+    from panier.cart import cart_run_dir
+    from panier.offers_cache import list_cache_entries
+
+    household = load_active_household(data_dir)
+    profile = load_profile(data_dir)
+    cutoff = _history_since(promo_since)
+    history = history_stats(data_dir, since=cutoff)
+    promos = promo_candidates(data_dir, since=cutoff)
+    cache_entries = list_cache_entries(data_dir)
+
+    def store_status(store: str) -> bool:
+        return household.stores.get(normalize_name(store), True)
+
+    known_stores = ["auchan", "carrefour", "intermarche", "leclerc"]
+    if household is not None:
+        for store in household.stores:
+            if store not in known_stores:
+                known_stores.append(store)
+
+    recipes_count = len(load_recipes(data_dir)) if recipes_path(data_dir).exists() else 0
+    pantry = load_pantry_if_exists(data_dir)
+    latest_run_id: str | None = None
+    latest_file = cart_run_dir(data_dir) / "latest.txt"
+    if latest_file.exists():
+        latest_run_id = latest_file.read_text(encoding="utf-8").strip()
+
+    payload: dict[str, object] = {
+        "active_household": household.name if household else None,
+        "profile_source": (
+            f"foyer:{household.name}" if household else str(profile_path(data_dir))
+        ),
+        "preferences": {
+            "allergies": sorted(profile.allergies),
+            "forbidden": sorted(profile.forbidden),
+            "dislikes": sorted(
+                f"{value} ({profile.detail_for('dislikes', value).status})"
+                if profile.detail_for("dislikes", value)
+                else value
+                for value in profile.dislikes
+            ),
+            "likes": sorted(profile.likes),
+            "accepted_recipes": sorted(profile.accepted_recipes),
+            "rejected_recipes": sorted(profile.rejected_recipes),
+        },
+        "household": {
+            "geo_zone": household.geo_zone if household else None,
+            "servings_per_meal": household.servings_per_meal if household else None,
+            "budget_max_eur": household.budget_max_eur if household else None,
+            "stores_enabled": sorted(store for store in known_stores if store_status(store)),
+            "stores_disabled": sorted(store for store in known_stores if not store_status(store)),
+        }
+        if household
+        else {"geo_zone": None, "servings_per_meal": None, "budget_max_eur": None,
+              "stores_enabled": sorted(known_stores), "stores_disabled": []},
+        "files": {
+            "recipes_count": recipes_count,
+            "pantry_items": len(pantry.items) if pantry else 0,
+            "offers_cache_entries": len(cache_entries),
+            "history_points": history["total_points"],
+        },
+        "history": history,
+        "promos_since": promo_since,
+        "promos": [
+            {
+                "canonical_name": trend.canonical_name,
+                "store": trend.store,
+                "last_price": trend.last_price,
+                "median_price": round(trend.median_price, 4),
+            }
+            for trend in promos
+        ],
+        "latest_cart_run": latest_run_id,
+        "cache_by_store": {
+            store: {
+                "entries": sum(1 for e in cache_entries if e.store == store),
+                "newest_age_s": min(
+                    (entry_age_seconds(e) for e in cache_entries if e.store == store),
+                    default=None,
+                ),
+            }
+            for store in sorted({e.store for e in cache_entries})
+        },
+    }
+
+    if normalize_output_format(output_format) == "json":
+        echo_json(payload)
+        return
+
+    typer.echo("Tableau de bord Panier")
+    typer.echo(f"Foyer actif: {payload['profile_source']}")
+    if household is not None:
+        _echo_household_meta(household)
+
+    prefs = payload["preferences"]
+    typer.echo("\nPréférences:")
+    typer.echo(f"  Allergènes: {', '.join(prefs['allergies']) or '—'}")
+    typer.echo(f"  Interdits: {', '.join(prefs['forbidden']) or '—'}")
+    typer.echo(f"  Détestés: {', '.join(prefs['dislikes']) or '—'}")
+    typer.echo(f"  Préférés: {', '.join(prefs['likes']) or '—'}")
+    typer.echo(f"  Recettes acceptées: {', '.join(prefs['accepted_recipes']) or '—'}")
+    typer.echo(f"  Recettes rejetées: {', '.join(prefs['rejected_recipes']) or '—'}")
+
+    meta = payload["household"]
+    typer.echo("\nMagasins & budget:")
+    typer.echo(f"  Activés: {', '.join(meta['stores_enabled']) or '—'}")
+    typer.echo(f"  Désactivés: {', '.join(meta['stores_disabled']) or '—'}")
+    typer.echo(f"  Zone géographique: {meta['geo_zone'] or '—'}")
+    typer.echo(f"  Budget max: {meta['budget_max_eur'] or '—'}")
+
+    files = payload["files"]
+    typer.echo("\nDonnées locales:")
+    typer.echo(f"  Recettes: {files['recipes_count']} | Placard: {files['pantry_items']} articles")
+    typer.echo(f"  Cache offres: {files['offers_cache_entries']} entrée(s)")
+    typer.echo(
+        f"  Historique prix: {history['total_points']} point(s), "
+        f"{history['distinct_items']} ingrédient(s)"
+        + (f" (dernier {history['newest']})" if history["newest"] else "")
+    )
+
+    typer.echo(f"\nPromos candidates (--since {promo_since}):")
+    if not promos:
+        typer.echo("  —")
+    for trend in promos:
+        delta = f"{trend.delta_pct:+.1f} %" if trend.delta_pct is not None else "n/a"
+        typer.echo(
+            f"  - {trend.canonical_name} ({trend.store}): "
+            f"{trend.last_price:.2f} € vs médiane {trend.median_price:.2f} € ({delta})"
+        )
+
+    by_store = payload["cache_by_store"]
+    typer.echo("\nCache offres par store:")
+    if not by_store:
+        typer.echo("  —")
+    for store, info in sorted(by_store.items()):
+        age = info["newest_age_s"]
+        age_text = f"{age:.0f}s" if isinstance(age, float) else "?"
+        typer.echo(f"  - {store}: {info['entries']} entrée(s), plus récente âge {age_text}")
+
+    typer.echo("\nDernier run panier:")
+    typer.echo(f"  {latest_run_id or '—'}")

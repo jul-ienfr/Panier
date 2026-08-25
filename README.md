@@ -209,6 +209,80 @@ panier cart remove --run latest --cart-dry-run
 
 La séparation est volontaire : `plan` décide le panier cible, `cart status` relit l'audit, `cart sync` compare en lecture seule, puis `cart add/remove --cart-live` est l'étape explicite à effet réel.
 
+## Collecte : cache offres TTL et parallélisation
+
+- La collecte multi-drives (`plan/week --collect`) exécute **un worker par store en parallèle**, avec timeout global du cycle (défaut 300 s, `PANIER_COLLECT_TIMEOUT_SECONDS` / `--collect-timeout-seconds`). L'échec ou le timeout d'un store n'affecte jamais les autres.
+- Chaque collecte réussie écrit un cache par store et liste d'articles dans `~/.panier/cache/offers/<store>-<hash>.yaml`, TTL 6 h (`--cache-ttl-hours` / `PANIER_CACHE_TTL_HOURS`). Un hit frais = zéro navigateur ; une entrée périmée sert de repli si la recollecte échoue. `--no-cache` force le frais.
+- Les payloads `--collect-output` exposent `cache` (source, age_s, stale) et, après recommandation, un bloc informatif `price_history`.
+
+## Historique prix et promos
+
+Chaque collecte fraîche alimente `~/.panier/history.sqlite3` (append-only) :
+
+```bash
+panier history show "emmental râpé" [--store leclerc] [--since 30d]
+panier history trend "emmental râpé"      # min/moyenne/médiane/dernier, variation %
+panier history promos --since 7d          # prix courant < médiane historique
+```
+
+Le bloc « Historique prix » affiché par `compare/plan/week` est strictement informatif (`--no-price-history` pour le taire) : il ne change jamais la recommandation.
+
+## Coût par recette
+
+```bash
+panier recipe cost "Gratin pâtes thon" [--prices offers.yaml]
+panier recipe list --sort-cost            # non pricées en dernier
+panier recipe suggest --meals 3 --max-cost-per-meal 6
+```
+
+Priorité des sources : YAML `--prices` (déterministe) puis historique local ; un ingrédient sans source est listé `unpriced` explicitement (total partiel, jamais d'estimation silencieuse).
+
+## Semaine étendue
+
+```bash
+panier week --days 7 --slots dej,diner \
+  --max-repeats-per-week 2 [--shuffle-seed 42]
+```
+
+Grille jour/slot déterministe : recettes distinctes d'abord, réutilisation prioritaire pour les recettes taguées `batch` dans la limite du cap de répétition. `--shuffle-seed` est la seule source de variabilité. Coût hebdo estimé quand toutes les recettes sont pricées.
+
+## Foyers nommés
+
+Un foyer regroupe allergènes, préférences, magasins activés/désactivés, zone géographique, portions et budget :
+
+```bash
+panier profile create famille --from-base --geo-zone 74350 \
+  --enable-store leclerc --disable-store intermarche \
+  --servings 4 --budget-max-eur 80
+panier profile use famille        # active le foyer (profile.yaml reste intouché)
+panier profile list | show | set | remove | unuse
+```
+
+Tant que le fichier `profiles/active.txt` désigne un foyer, toutes les commandes `profile *` lisent/écrivent ses préférences (`profiles/<nom>.yaml`) et les stores désactivés filtrent les recommandations. Sans foyer actif, comportement historique sur `profile.yaml`. Le schéma accepte entrées simples (`allergies: [crevette]`) et détaillées :
+
+```yaml
+dislikes:
+  - value: chou fleur
+    status: temporary-context   # pénalise le tri au lieu de filtrer
+    reason: régime passager
+    confidence: medium
+```
+
+Confiances (`confirmed > strong > medium > low`) pondèrent le score de suggestion uniquement — l'invariant testé : allergènes et interdits sont rejetés absolument, quel que soit statut ou confiance.
+
+## Tableau de bord
+
+```bash
+panier dashboard                 # vue complète texte
+panier dashboard --format json   # même payload en JSON
+```
+
+Foyer actif, préférences, magasins/budget, état des fichiers locaux, statistiques d'historique, promos candidates et dernier run panier.
+
+## CI et typage progressif
+
+GitHub Actions (Python 3.11/3.12) exécute `ruff check`, `pytest` et `python scripts/check_mypy.py` : les erreurs mypy listées dans `mypy-baseline.txt` sont tolérées, toute nouvelle erreur échoue. Résorption fichier par fichier bienvenue.
+
 ## Déterminisme et garde-fou LLM
 
 Panier fonctionne aujourd'hui en déterministe local-first : les commandes de planification, scoring, comparaison et explication n'appellent pas de LLM. Le garde-fou `PANIER_NO_LLM` est disponible pour verrouiller ce comportement avant d'éventuelles intégrations futures :

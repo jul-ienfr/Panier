@@ -294,6 +294,35 @@ def parse_since(value: str | None, *, now: datetime | None = None) -> datetime |
     return parsed
 
 
+def history_stats(data_dir: Path, *, since: datetime | None = None) -> dict:
+    """Statistiques globales de l'historique (pour le dashboard)."""
+    if not history_db_path(data_dir).exists():
+        return {"total_points": 0, "distinct_items": 0, "oldest": None, "newest": None}
+    conn = connect(data_dir)
+    try:
+        clause = ""
+        params: list[object] = []
+        if since is not None:
+            clause = "WHERE collected_at >= ?"
+            params.append(since.isoformat(timespec="seconds"))
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*), COUNT(DISTINCT canonical_name),
+                   MIN(collected_at), MAX(collected_at)
+            FROM offers {clause}
+            """,
+            params,
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "total_points": int(row[0] or 0),
+        "distinct_items": int(row[1] or 0),
+        "oldest": row[2],
+        "newest": row[3],
+    }
+
+
 def known_brand_names(data_dir: Path) -> frozenset[str]:
     """Noms de marques connues localement (préférences utilisateur)."""
     from panier.brands import load_brand_preferences

@@ -10,6 +10,7 @@ from panier.brands import BrandPreferenceAction, BrandPreferences
 from panier.models import (
     FoodProfile,
     Pantry,
+    PreferenceConfidence,
     PriceMode,
     Recipe,
     ShoppingItem,
@@ -88,6 +89,37 @@ def filter_recipes(
     return filtered
 
 
+def preference_score_adjustment(
+    recipe: Recipe, profile: FoodProfile | None
+) -> int:
+    """Bonus/malus par confiance appliqué AU TRI uniquement (jamais au filtrage).
+
+    Les refus contextuels (temporary-context) pénalisent aussi le score sans
+    filtrer ; allergènes et interdits ne passent jamais par ici car la recette
+    a déjà été exclue par compatible_recipes.
+    """
+    if profile is None:
+        return 0
+    adjustment = 0
+    seen: set[str] = set()
+    for ingredient in recipe.ingredients:
+        normalized = normalize_name(ingredient.name)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        like = profile.detail_for("likes", normalized)
+        if like is not None and normalized in profile.likes:
+            adjustment += like.confidence.weight
+        elif normalized in profile.likes:
+            adjustment += PreferenceConfidence.CONFIRMED.weight
+        dislike = profile.detail_for("dislikes", normalized)
+        if dislike is not None and normalized in profile.dislikes:
+            adjustment -= dislike.confidence.weight
+        elif normalized in profile.dislikes:
+            adjustment -= PreferenceConfidence.CONFIRMED.weight
+    return adjustment
+
+
 def recipe_selection_score(
     recipe: Recipe,
     *,
@@ -108,6 +140,8 @@ def recipe_selection_score(
     score = 0
     if profile is not None and normalize_name(recipe.name) in profile.accepted_recipes:
         score += 1000
+
+    score += preference_score_adjustment(recipe, profile)
 
     if include_tags:
         score += 10 * len(recipe_tags.intersection(include_tags))

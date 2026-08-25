@@ -150,3 +150,16 @@ def cache_report_line(store: str, count: int, *, age_s: float | None, stale: boo
     if stale:
         suffix += ", stale"
     return f"Collecte {store}: {count} offres{suffix})"
+
+
+def list_cache_entries(data_dir: Path) -> list[OffersCacheEntry]:
+    """Toutes les entrées de cache lisibles (pour le dashboard)."""
+    directory = offers_cache_dir(data_dir)
+    if not directory.exists():
+        return []
+    entries: list[OffersCacheEntry] = []
+    for path in sorted(directory.glob("*.yaml")):
+        entry = load_cached_entry(path)
+        if entry is not None:
+            entries.append(entry)
+    return entries
