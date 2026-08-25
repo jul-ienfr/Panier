@@ -279,6 +279,18 @@ panier dashboard --format json   # même payload en JSON
 
 Foyer actif, préférences, magasins/budget, état des fichiers locaux, statistiques d'historique, promos candidates et dernier run panier.
 
+### Dashboard web (LAN)
+
+```bash
+panier dashboard --serve                          # http://localhost:8420 (local uniquement)
+panier dashboard --serve --host 0.0.0.0 --port 8420   # accessible depuis le réseau LAN
+```
+
+- Serveur HTTP stdlib, zéro dépendance ; routes `/` (HTML auto-refresh 60 s) et `/json`.
+- Le payload est recalculé à chaque requête : les données suivent les fichiers sans redémarrage.
+- `--host` par défaut `127.0.0.1`. Avec `0.0.0.0`, les URLs LAN détectées sont affichées au démarrage.
+- **Aucune authentification** : le mode `0.0.0.0` expose vos données locales (préférences, historique) à tout le réseau — à réserver à un LAN de confiance, ou à protéger par pare-feu/reverse-proxy.
+
 ## CI et typage progressif
 
 GitHub Actions (Python 3.11/3.12) exécute `ruff check`, `pytest` et `python scripts/check_mypy.py` : les erreurs mypy listées dans `mypy-baseline.txt` sont tolérées, toute nouvelle erreur échoue. Résorption fichier par fichier bienvenue.

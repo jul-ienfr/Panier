@@ -8,6 +8,8 @@ src/panier/cli.py:3535: error: Argument 1 to "float" has incompatible type "floa
 src/panier/cli.py:3535: error: Generator has incompatible item type "float"; expected "bool"  [misc]
 src/panier/cli.py:3543: error: Argument 1 to "float" has incompatible type "float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"  [arg-type]
 src/panier/cli.py:3543: error: Generator has incompatible item type "float"; expected "bool"  [misc]
+src/panier/cli.py:3725: error: Item "int" of "str | int" has no attribute "startswith"  [union-attr]
+src/panier/cli.py:3726: error: Argument 1 to "append" of "list" has incompatible type "str | int"; expected "str"  [arg-type]
 src/panier/cli.py:683: error: Argument 1 to "len" has incompatible type "Any | list[Any] | None"; expected "Sized"  [arg-type]
 src/panier/cli.py:705: error: Argument 1 to "len" has incompatible type "Any | list[Any] | None"; expected "Sized"  [arg-type]
 src/panier/cli.py:706: error: Argument 1 to "len" has incompatible type "Any | list[Any] | None"; expected "Sized"  [arg-type]

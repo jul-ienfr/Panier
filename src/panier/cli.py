@@ -3706,15 +3706,58 @@ def compare(
     echo_price_history_block(recommendation.by_item, data_dir, enabled=price_history)
 
 
-@app.command("dashboard")
-def dashboard(
-    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
-    promo_since: Annotated[
-        str, typer.Option("--promo-since", help="Fenêtre promos (ex: 7d)")
-    ] = "7d",
-    output_format: OutputFormat = "text",
-) -> None:
-    """Vue d'ensemble : foyer, préférences, magasins, fichiers, historique, cache."""
+def _lan_addresses(port: int) -> list[str]:
+    """Adresses LAN probables de cette machine pour l'affichage du serveur."""
+    import socket
+
+    addresses: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            addresses.append(sock.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        hostnames = {socket.gethostname(), socket.getfqdn()}
+        for hostname in hostnames:
+            for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127.") and ip not in addresses:
+                    addresses.append(ip)
+    except OSError:
+        pass
+    return [f"http://{ip}:{port}/" for ip in addresses]
+
+
+def _serve_dashboard_http(*, payload_builder, host: str, port: int) -> None:
+    from panier.dashboard_web import make_dashboard_server
+
+    try:
+        server = make_dashboard_server(host, port, payload_builder)
+    except OSError as exc:
+        typer.echo(f"Impossible d'écouter sur {host}:{port} : {exc}", err=True)
+        raise typer.Exit(1) from exc
+    bound_port = server.server_address[1]
+    typer.echo(
+        f"Dashboard HTTP sur http://localhost:{bound_port}/ (Ctrl+C pour arrêter)"
+    )
+    if server.server_address[0] == "0.0.0.0":
+        for url in _lan_addresses(bound_port):
+            typer.echo(f"  accessible sur le LAN : {url}")
+        typer.echo(
+            "Attention: aucune authentification ; données locales exposées au réseau.",
+            err=True,
+        )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        typer.echo("\nServeur arrêté.")
+    finally:
+        server.server_close()
+
+
+def _dashboard_payload(data_dir: Path, promo_since: str) -> dict[str, Any]:
+    """Construit le payload du dashboard (texte, JSON et mode serveur)."""
     from panier.cart import cart_run_dir
     from panier.offers_cache import list_cache_entries
 
@@ -3800,6 +3843,35 @@ def dashboard(
             for store in sorted({e.store for e in cache_entries})
         },
     }
+    return payload
+
+
+@app.command("dashboard")
+def dashboard(
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    promo_since: Annotated[
+        str, typer.Option("--promo-since", help="Fenêtre promos (ex: 7d)")
+    ] = "7d",
+    output_format: OutputFormat = "text",
+    serve: Annotated[
+        bool,
+        typer.Option("--serve", help="Servir le dashboard en HTTP (Ctrl+C pour arrêter)."),
+    ] = False,
+    host: Annotated[
+        str, typer.Option("--host", help="Interface d'écoute (0.0.0.0 = LAN).")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8420,
+) -> None:
+    """Vue d'ensemble : foyer, préférences, magasins, fichiers, historique, cache."""
+    payload = _dashboard_payload(data_dir, promo_since)
+
+    if serve:
+        _serve_dashboard_http(
+            payload_builder=lambda: _dashboard_payload(data_dir, promo_since),
+            host=host,
+            port=port,
+        )
+        return
 
     if normalize_output_format(output_format) == "json":
         echo_json(payload)
@@ -3807,6 +3879,7 @@ def dashboard(
 
     typer.echo("Tableau de bord Panier")
     typer.echo(f"Foyer actif: {payload['profile_source']}")
+    household = load_active_household(data_dir)
     if household is not None:
         _echo_household_meta(household)
 
@@ -3827,6 +3900,7 @@ def dashboard(
     typer.echo(f"  Budget max: {meta['budget_max_eur'] or '—'}")
 
     files = payload["files"]
+    history = payload["history"]
     typer.echo("\nDonnées locales:")
     typer.echo(f"  Recettes: {files['recipes_count']} | Placard: {files['pantry_items']} articles")
     typer.echo(f"  Cache offres: {files['offers_cache_entries']} entrée(s)")
@@ -3837,13 +3911,15 @@ def dashboard(
     )
 
     typer.echo(f"\nPromos candidates (--since {promo_since}):")
+    promos = payload["promos"]
     if not promos:
         typer.echo("  —")
-    for trend in promos:
-        delta = f"{trend.delta_pct:+.1f} %" if trend.delta_pct is not None else "n/a"
+    for promo in promos:
+        delta_pct = promo.get("delta_pct")
+        delta = f"{delta_pct:+.1f} %" if delta_pct is not None else "n/a"
         typer.echo(
-            f"  - {trend.canonical_name} ({trend.store}): "
-            f"{trend.last_price:.2f} € vs médiane {trend.median_price:.2f} € ({delta})"
+            f"  - {promo['canonical_name']} ({promo['store']}): "
+            f"{promo['last_price']:.2f} € vs médiane {promo['median_price']:.2f} € ({delta})"
         )
 
     by_store = payload["cache_by_store"]
@@ -3855,5 +3931,6 @@ def dashboard(
         age_text = f"{age:.0f}s" if isinstance(age, float) else "?"
         typer.echo(f"  - {store}: {info['entries']} entrée(s), plus récente âge {age_text}")
 
+    latest_run_id = payload["latest_cart_run"]
     typer.echo("\nDernier run panier:")
     typer.echo(f"  {latest_run_id or '—'}")
