@@ -28,11 +28,12 @@ def _payload_builder(data_dir: Path):
     return build
 
 
-def test_render_html_escapes_and_lists_sections() -> None:
+def test_render_html_escapes_and_uses_structured_layout() -> None:
     html = render_dashboard_html(
         {
             "preferences": {"allergies": ["<script>x</script>"]},
             "promos": [],
+            "promos_since": "7d",
         }
     )
 
@@ -41,6 +42,54 @@ def test_render_html_escapes_and_lists_sections() -> None:
     assert "<script>" not in html
     assert "/json" in html
     assert 'http-equiv="refresh"' in html
+    # cartes structurées en français, pas de clés brutes en titres
+    assert ">Foyer</h2>" in html
+    assert ">Préférences</h2>" in html
+    assert ">Magasins</h2>" in html
+    assert ">Données locales</h2>" in html
+    assert "Promos candidates (7d)" in html
+    assert "Aucun candidat détecté" in html
+    assert 'class="chip' in html
+    assert "active_household" not in html
+
+
+def test_render_html_shows_promos_table_and_store_chips() -> None:
+    html = render_dashboard_html(
+        {
+            "preferences": {},
+            "household": {
+                "stores_enabled": ["leclerc"],
+                "stores_disabled": ["auchan"],
+                "geo_zone": "74350",
+                "servings_per_meal": 4,
+                "budget_max_eur": 80,
+            },
+            "promos": [
+                {
+                    "canonical_name": "emmental râpé",
+                    "store": "leclerc",
+                    "last_price": 1.9,
+                    "median_price": 2.5,
+                    "delta_pct": -24.0,
+                }
+            ],
+            "promos_since": "7d",
+            "cache_by_store": {
+                "leclerc": {"entries": 2, "newest_age_s": 4321.0},
+            },
+        }
+    )
+
+    assert 'class="chip on">leclerc<' in html
+    assert 'class="chip off">auchan<' in html
+    assert "emmental râpé" in html
+    assert "delta-down" in html
+    assert "-24.0 %" in html
+    assert "1.90 €" in html
+    assert "2.50 €" in html
+    assert "4321s" in html
+    assert "74350" in html
+    assert "80.00 €" in html
 
 
 def test_serve_mode_answers_html_and_json_on_ephemeral_port(tmp_path: Path) -> None:
