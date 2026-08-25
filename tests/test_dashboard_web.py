@@ -14,6 +14,11 @@ from panier.dashboard_web import make_dashboard_server, render_dashboard_html
 RUNNER = CliRunner()
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
 def _payload_builder(data_dir: Path):
     def build() -> dict:
         from panier.cli import _dashboard_payload
@@ -64,12 +69,24 @@ def test_serve_mode_answers_html_and_json_on_ephemeral_port(tmp_path: Path) -> N
             assert payload["preferences"]["allergies"] == ["crevette"]
             assert payload["files"]["recipes_count"] == 1
 
+        # la route /dashboard fonctionne aussi (avec ou sans slash final)
+        for path in ("/dashboard", "/dashboard/"):
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}{path}", timeout=5
+            ) as response:
+                assert response.status == 200
+                assert "Tableau de bord" in response.read().decode("utf-8")
+
+        # chemin inconnu : redirection vers l'accueil au lieu d'un 404 sec
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/inexistant")
+        opener = urllib.request.build_opener(_NoRedirect())
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/inexistant", timeout=5)
+            opener.open(request, timeout=5)
         except urllib.error.HTTPError as exc:
-            assert exc.code == 404
+            assert exc.code == 302
+            assert exc.headers["Location"] == "/"
         else:
-            raise AssertionError("404 attendu")
+            raise AssertionError("302 attendu")
 
         # le payload est recalculé à chaque requête : un nouveau fichier apparaît
         (tmp_path / "pantry.yaml").write_text(

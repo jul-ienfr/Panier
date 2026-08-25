@@ -77,15 +77,19 @@ def make_dashboard_server(
         server_version = "PanierDashboard/1.0"
 
         def do_GET(self) -> None:  # noqa: N802 (API http.server)
-            path = self.path.split("?", maxsplit=1)[0]
-            if path in {"/", "/index.html"}:
+            path = self.path.split("?", maxsplit=1)[0].rstrip("/") or "/"
+            if path in {"/", "/index.html", "/dashboard"}:
                 self._respond(render_dashboard_html(payload_builder()), "text/html")
                 return
-            if path == "/json":
+            if path == "/json" or path == "/dashboard/json":
                 body = json.dumps(payload_builder(), ensure_ascii=False, default=str)
                 self._respond(body, "application/json")
                 return
-            self.send_error(404)
+            # Chemin inconnu : retour accueil plutôt qu'un 404 sec.
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _respond(self, body: str, content_type: str) -> None:
             data = body.encode("utf-8")
