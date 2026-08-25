@@ -283,6 +283,17 @@ Foyer actif, préférences, magasins/budget, état des fichiers locaux, statisti
 
 GitHub Actions (Python 3.11/3.12) exécute `ruff check`, `pytest` et `python scripts/check_mypy.py` : les erreurs mypy listées dans `mypy-baseline.txt` sont tolérées, toute nouvelle erreur échoue. Résorption fichier par fichier bienvenue.
 
+## Support drives
+
+| Store | Recherche | Collecte | Panier dry-run | Panier live |
+|---|---|---|---|---|
+| Leclerc | ✅ (tri=2/4) | ✅ validée | ✅ | ⚠️ anti-bot variable |
+| Auchan | ✅ | ✅ validée | ✅ | ✅ validée |
+| Carrefour | ✅ (`/s?q=`) | ✅ extraction générique | ✅ flow dédié | code + fake-runner tests ; validation live à faire avec le profil `courses-carrefour` |
+| Intermarché | URL connue | ❌ DataDome bloque l'extraction fiable | ❌ | ❌ |
+
+Chaque drive exige son profil déclaré côté Managed Browser (`courses`, `courses-auchan`, `courses-carrefour`) : un profil manquant provoque une erreur HTTP 500 de politique. Le profil est résolu automatiquement par `managed_browser_profile_for_drive`.
+
 ## Déterminisme et garde-fou LLM
 
 Panier fonctionne aujourd'hui en déterministe local-first : les commandes de planification, scoring, comparaison et explication n'appellent pas de LLM. Le garde-fou `PANIER_NO_LLM` est disponible pour verrouiller ce comportement avant d'éventuelles intégrations futures :

@@ -59,12 +59,15 @@ def dedupe_drives(drives: list[str]) -> list[str]:
 def managed_browser_profile_for_drive(profile: str, drive: str) -> str:
     """Résout le profil Managed Browser adapté au drive.
 
-    Le profil historique `courses` reste valide pour Leclerc, mais Auchan est déclaré
-    côté Managed Browser sous `courses-auchan`. Utiliser `courses` avec `site=auchan`
+    Le profil historique `courses` reste valide pour Leclerc, mais chaque autre
+    drive est déclaré côté Managed Browser sous son propre profil
+    (`courses-auchan`, `courses-carrefour`). Utiliser un profil non déclaré
     déclenche une erreur HTTP 500 de politique de profil.
     """
-    if normalize_name(profile) == "courses" and normalize_name(drive) == "auchan":
-        return "courses-auchan"
+    normalized_profile = normalize_name(profile)
+    normalized_drive = normalize_name(drive)
+    if normalized_profile == "courses" and normalized_drive in {"auchan", "carrefour"}:
+        return f"courses-{normalized_drive}"
     return profile
 
 

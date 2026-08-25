@@ -21,6 +21,8 @@ from panier.brands import (
 from panier.cart import (
     AUCHAN_CART_ADD_EVAL_JS,
     AUCHAN_CART_REMOVE_EVAL_JS,
+    CARREFOUR_CART_ADD_EVAL_JS,
+    CARREFOUR_CART_REMOVE_EVAL_JS,
     CART_ADD_EVAL_JS,
     CART_REMOVE_EVAL_JS,
     CartLine,
@@ -365,14 +367,14 @@ def recipes_to_shopping_payload(items: list[ShoppingItem]) -> dict[str, list[dic
 
 def cart_flow_name_for_drive(drive: str) -> str:
     normalized = normalize_name(drive)
-    if normalized in {"auchan", "leclerc"}:
+    if normalized in {"auchan", "carrefour", "leclerc"}:
         return f"add-cart-{normalized}"
     raise typer.BadParameter(f"Drive non supporté pour ajout panier : {drive}")
 
 
 def cart_remove_flow_name_for_drive(drive: str) -> str:
     normalized = normalize_name(drive)
-    if normalized in {"auchan", "leclerc"}:
+    if normalized in {"auchan", "carrefour", "leclerc"}:
         return f"remove-cart-{normalized}"
     raise typer.BadParameter(f"Drive non supporté pour suppression panier : {drive}")
 
@@ -396,6 +398,8 @@ def _cart_remove_expression(store: str, line: CartLine, *, dry_run: bool) -> str
     }
     if normalize_name(store) == "auchan":
         return f"({AUCHAN_CART_REMOVE_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+    if normalize_name(store) == "carrefour":
+        return f"({CARREFOUR_CART_REMOVE_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
     return f"({CART_REMOVE_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
 
 
@@ -499,6 +503,16 @@ def run_cart_flow_for_store(
                 }
                 expression = (
                     f"({AUCHAN_CART_ADD_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
+                )
+            elif normalize_name(store) == "carrefour":
+                payload = {
+                    "item": line.item,
+                    "product": line.product,
+                    "quantity": line.quantity,
+                    "dryRun": False,
+                }
+                expression = (
+                    f"({CARREFOUR_CART_ADD_EVAL_JS})({json.dumps(payload, ensure_ascii=False)})"
                 )
             else:
                 expression = _cart_add_expression(line, dry_run=False)

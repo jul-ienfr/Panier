@@ -71,6 +71,8 @@ def store_search_url(store: str, query: str) -> str:
         return f"{LECLERC_DRIVE_BASE_URL}/recherche.aspx?TexteRecherche={encoded}&tri=1"
     if normalized == "auchan":
         return f"https://www.auchan.fr/recherche?text={encoded}"
+    if normalized == "carrefour":
+        return f"https://www.carrefour.fr/s?q={encoded}"
     return ""
 
 
@@ -80,6 +82,8 @@ def store_cart_url(store: str) -> str:
         return f"{LECLERC_DRIVE_BASE_URL}/mon-panier.aspx"
     if normalized == "auchan":
         return "https://www.auchan.fr/panier"
+    if normalized == "carrefour":
+        return "https://www.carrefour.fr/cart"
     return ""
 
 
@@ -715,6 +719,170 @@ async ({ item, product, quantity, dryRun }) => {
     clicked,
     changed_after_click: changed,
     button_label: addButton ? (addButton.innerText || addButton.textContent || addButton.getAttribute?.('aria-label') || addButton.value || '').trim() : '',
+    visible_text: visibleText.slice(0, 500),
+    error,
+  };
+}
+"""
+
+
+CARREFOUR_CART_ADD_EVAL_JS = r"""
+async ({ item, product, quantity, dryRun }) => {
+  /* ruff: noqa: E501 */
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const norm = (value) => String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const wanted = norm(product || item);
+  const challenge = /datadome|captcha|geo-?block/i.test(document.documentElement?.outerHTML || '');
+  if (challenge) {
+    return {
+      item, product, url: location.href,
+      catalog_found: false, addable: false, inserted: false, clicked: false,
+      changed_after_click: false, button_label: '', visible_text: '',
+      blocked_by: 'anti_bot_challenge',
+      error: 'Carrefour bloque la page (anti-bot/geoblock); ajout panier non exécuté.',
+    };
+  }
+  const wantedTokens = wanted.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+  const textOf = (node) => norm(node?.innerText || node?.textContent || '');
+  const nodes = Array.from(document.querySelectorAll(
+    '[data-testid="product-card"], [data-testid*=product], article[class*=product], [class*=ProductCard], [class*=product-card], article'
+  ));
+  const scored = nodes
+    .map((node) => {
+      const text = textOf(node);
+      if (!text || !/\d|€|ajouter/.test(text)) return null;
+      const score = wantedTokens.reduce((total, token) => total + (text.includes(token) ? 1 : 0), 0);
+      const exact = wanted && text.includes(wanted);
+      return { node, score: exact ? score + 5 : score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  const card = scored.find((entry) => entry.score > 0)?.node || null;
+  const catalogFound = Boolean(card);
+  const visibleText = card ? (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  const controls = card ? Array.from(card.querySelectorAll('button, a[role=button], input[type=button], [role=button]')) : [];
+  const addButton = controls.find((el) => {
+    const label = [el.innerText, el.textContent, el.getAttribute?.('aria-label'), el.getAttribute?.('title')]
+      .filter(Boolean).join(' ');
+    const disabled = el.disabled || el.getAttribute?.('aria-disabled') === 'true';
+    if (disabled) return false;
+    if (/supprimer|retirer|moins|indisponible|rupture/i.test(label)) return false;
+    if (/paiement|payer|commande|commander|valider|checkout/i.test(label)) return false;
+    return /ajouter/i.test(label) || /panier/i.test(label);
+  });
+  const addable = Boolean(addButton);
+  const beforeCartText = document.body?.innerText || '';
+  let clicked = false;
+  let error = null;
+  if (addable && !dryRun) {
+    try {
+      addButton.scrollIntoView({ block: 'center', inline: 'center' });
+      await sleep(150);
+      for (let i = 0; i < Math.max(1, Number(quantity || 1)); i += 1) {
+        if (i > 0) await sleep(400);
+        addButton.click();
+        clicked = true;
+      }
+      await sleep(1500);
+    } catch (err) {
+      error = err?.message || String(err);
+    }
+  }
+  const afterCartText = document.body?.innerText || '';
+  return {
+    item, product, url: location.href,
+    catalog_found: catalogFound,
+    addable,
+    inserted: clicked && !error,
+    clicked,
+    changed_after_click: beforeCartText !== afterCartText,
+    button_label: addButton ? (addButton.getAttribute?.('aria-label') || addButton.innerText || '').trim() : '',
+    visible_text: visibleText.slice(0, 500),
+    error,
+  };
+}
+"""
+
+
+CARREFOUR_CART_REMOVE_EVAL_JS = r"""
+async ({ item, product, quantity, dryRun }) => {
+  /* ruff: noqa: E501 */
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const norm = (value) => String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const wanted = norm(product || item);
+  const challenge = /datadome|captcha|geo-?block/i.test(document.documentElement?.outerHTML || '');
+  if (challenge) {
+    return {
+      item, product, url: location.href,
+      catalog_found: false, removable: false, removed: false, clicked: false,
+      changed_after_click: false, button_label: '', visible_text: '',
+      blocked_by: 'anti-bot',
+      error: 'Blocage anti-bot détecté sur Carrefour',
+    };
+  }
+  const wantedTokens = wanted.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+  const textOf = (node) => norm(node?.innerText || node?.textContent || '');
+  const root = document.querySelector('[data-testid*=cart], [class*=cart i], main') || document.body;
+  const nodes = Array.from(root.querySelectorAll('[data-testid="cart-item"], [data-testid*=item], li, article'));
+  const scored = nodes
+    .map((node) => {
+      const text = textOf(node);
+      if (!text || !/\d|€|supprimer/.test(text)) return null;
+      const score = wantedTokens.reduce((total, token) => total + (text.includes(token) ? 1 : 0), 0);
+      const exact = wanted && text.includes(wanted);
+      return { node, score: exact ? score + 5 : score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  const line = scored.find((entry) => entry.score > 0)?.node || null;
+  const catalogFound = Boolean(line);
+  const visibleText = line ? (line.innerText || line.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  const controls = line ? Array.from(line.querySelectorAll('button, [role=button], input[type=button]')) : [];
+  const removeButton = controls.find((el) => {
+    const label = [el.innerText, el.textContent, el.getAttribute?.('aria-label'), el.getAttribute?.('title')]
+      .filter(Boolean).join(' ');
+    const disabled = el.disabled || el.getAttribute?.('aria-disabled') === 'true';
+    if (disabled) return false;
+    if (/ajouter|add|paiement|commander|valider|checkout/i.test(label)) return false;
+    return /supprimer|retirer|remove|moins|corbeille/i.test(label);
+  });
+  const removable = Boolean(removeButton);
+  const beforeCartText = document.body?.innerText || '';
+  let clicked = false;
+  let error = null;
+  if (removable && !dryRun) {
+    try {
+      removeButton.scrollIntoView({ block: 'center', inline: 'center' });
+      await sleep(150);
+      for (let i = 0; i < Math.max(1, Number(quantity || 1)); i += 1) {
+        if (i > 0) await sleep(500);
+        removeButton.click();
+        clicked = true;
+      }
+      await sleep(1800);
+    } catch (err) {
+      error = err?.message || String(err);
+    }
+  }
+  const afterCartText = document.body?.innerText || '';
+  return {
+    item, product, url: location.href,
+    catalog_found: catalogFound,
+    removable,
+    removed: clicked && !error,
+    clicked,
+    changed_after_click: beforeCartText !== afterCartText,
+    button_label: removeButton ? (removeButton.getAttribute?.('aria-label') || removeButton.innerText || '').trim() : '',
     visible_text: visibleText.slice(0, 500),
     error,
   };
