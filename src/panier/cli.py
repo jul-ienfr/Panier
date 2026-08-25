@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -37,6 +38,13 @@ from panier.cart import (
     store_search_url,
 )
 from panier.catalog import ProductCatalog, load_catalog
+from panier.collector import (
+    CollectStatus,
+    collect_offers_parallel,
+    dedupe_drives,
+    managed_browser_profile_for_drive,
+    resolve_collect_timeout_seconds,
+)
 from panier.constraints import (
     BasketConstraints,
     constraints_path,
@@ -64,6 +72,16 @@ from panier.models import (
     normalize_name,
 )
 from panier.nutrition import BalanceScore, score_recipe_balance
+from panier.offers_cache import (
+    OffersCacheEntry,
+    cache_report_line,
+    entry_age_seconds,
+    load_cached_entry,
+    offers_cache_dir,
+    offers_cache_path,
+    resolve_cache_ttl_hours,
+    save_offers_cache,
+)
 from panier.planner import (
     CompareBy,
     compare_basket_options,
@@ -283,18 +301,6 @@ def parse_csv_set(value: str | None) -> set[str] | None:
 
 def recipes_to_shopping_payload(items: list[ShoppingItem]) -> dict[str, list[dict[str, object]]]:
     return {"items": [item.model_dump(mode="json", exclude_none=True) for item in items]}
-
-
-def managed_browser_profile_for_drive(profile: str, drive: str) -> str:
-    """Résout le profil Managed Browser adapté au drive.
-
-    Le profil historique `courses` reste valide pour Leclerc, mais Auchan est déclaré
-    côté Managed Browser sous `courses-auchan`. Utiliser `courses` avec `site=auchan`
-    déclenche une erreur HTTP 500 de politique de profil.
-    """
-    if normalize_name(profile) == "courses" and normalize_name(drive) == "auchan":
-        return "courses-auchan"
-    return profile
 
 
 def cart_flow_name_for_drive(drive: str) -> str:
@@ -747,6 +753,58 @@ def _echo_cart_sync_diff(store: str, diff: dict) -> None:
     typer.echo(f"  Ambigus: {summary.get('ambiguous_count', 0)}")
 
 
+def _store_worker(
+    items: list[ShoppingItem],
+    drives_profile: str,
+    browser_command: str | None,
+    max_results: int,
+    catalog: ProductCatalog | None,
+    bucket: dict[str, list[StoreOffer]] | None = None,
+) -> Callable[[str], list[StoreOffer]]:
+    """Worker d'un store : client isolé (profil par store) + collecte séquentielle.
+
+    Si `bucket` est fourni, les offres du store y sont déposées (dict thread-safe
+    pour une écriture par clé unique) afin de ventiler le résultat agrégé.
+    """
+
+    def worker(drive: str) -> list[StoreOffer]:
+        resolved_profile = managed_browser_profile_for_drive(drives_profile, drive)
+        browser = ManagedBrowserClient(
+            command=browser_command, profile=resolved_profile, site=drive
+        )
+        offers = _collect_drive_offers_with_optional_catalog(
+            items, drive, browser, max_results=max_results, catalog=catalog
+        )
+        if bucket is not None:
+            bucket[drive] = list(offers)
+        return list(offers)
+
+    return worker
+
+
+def _echo_collect_status(
+    drive: str,
+    status: CollectStatus,
+    offer_count: int,
+    error: str | None,
+    timeout_seconds: float,
+) -> None:
+    if status == "ok":
+        typer.echo(f"Collecte {drive}: {offer_count} offres")
+        return
+    if status == "timeout":
+        typer.echo(
+            f"Avertissement timeout {drive}: cycle de collecte > {timeout_seconds:g}s; "
+            "collecte ignorée pour ce drive.",
+            err=True,
+        )
+        return
+    typer.echo(
+        f"Avertissement Managed Browser {drive}: {error}; collecte ignorée pour ce drive.",
+        err=True,
+    )
+
+
 def collect_offers_for_drives(
     items: list[ShoppingItem],
     drives: list[str],
@@ -756,27 +814,138 @@ def collect_offers_for_drives(
     max_results: int,
     catalog: ProductCatalog | None = None,
 ) -> tuple[list[StoreOffer], bool]:
-    offers: list[StoreOffer] = []
-    had_failure = False
-    for drive in drives:
-        resolved_profile = managed_browser_profile_for_drive(profile, drive)
-        browser = ManagedBrowserClient(
-            command=browser_command, profile=resolved_profile, site=drive
+    """Collecte parallélisée entre stores (un worker par store), sans cache."""
+    unique_drives = dedupe_drives(drives)
+    timeout_seconds = resolve_collect_timeout_seconds()
+    bucket: dict[str, list[StoreOffer]] = {}
+    worker = _store_worker(items, profile, browser_command, max_results, catalog, bucket)
+    _, statuses, errors = collect_offers_parallel(unique_drives, worker)
+    aggregated: list[StoreOffer] = []
+    for drive in unique_drives:
+        status = statuses.get(drive, "timeout")
+        offers_of_drive = bucket.get(drive, [])
+        aggregated.extend(offers_of_drive)
+        _echo_collect_status(
+            drive, status, len(offers_of_drive), errors.get(drive), timeout_seconds
         )
-        try:
-            collected = _collect_drive_offers_with_optional_catalog(
-                items, drive, browser, max_results=max_results, catalog=catalog
-            )
-        except ManagedBrowserError as exc:
-            had_failure = True
+    return aggregated, any(status != "ok" for status in statuses.values())
+
+
+def collect_offers_with_cache(
+    items: list[ShoppingItem],
+    drives: list[str],
+    *,
+    profile: str,
+    browser_command: str | None,
+    max_results: int,
+    catalog: ProductCatalog | None,
+    data_dir: Path | None = None,
+    use_cache: bool = True,
+    ttl_hours: float | None = None,
+    timeout_seconds: float | None = None,
+) -> tuple[list[StoreOffer], bool, dict[str, dict]]:
+    """Cycle complet : cache offres (TTL) puis collecte parallèle des manquants.
+
+    - cache hit frais : zéro requête réseau pour ce store ;
+    - entrée stale : tentative de recollecte, repli sur l'entrée stale si échec ;
+    - chaque collecte réussie (même partielle) réécrit le cache du store.
+
+    Retourne (offres agrégées dans l'ordre demandé, échec présent, rapport
+    par store {source, count, age_s, stale}).
+    """
+    unique_drives = dedupe_drives(drives)
+    effective_ttl = resolve_cache_ttl_hours(ttl_hours)
+    effective_timeout = resolve_collect_timeout_seconds(timeout_seconds)
+    now = datetime.now(UTC)
+    report: dict[str, dict] = {}
+    fresh_cache_offers: dict[str, list[StoreOffer]] = {}
+    stale_entries: dict[str, OffersCacheEntry] = {}
+    pending: list[str] = []
+
+    for drive in unique_drives:
+        entry = (
+            load_cached_entry(offers_cache_path(data_dir, drive, items))
+            if use_cache and data_dir is not None
+            else None
+        )
+        if entry is None or not entry.offers:
+            pending.append(drive)
+            continue
+        age_s = entry_age_seconds(entry, now=now)
+        if age_s < effective_ttl * 3600:
+            fresh_cache_offers[drive] = list(entry.offers)
+            report[drive] = {
+                "source": "cache",
+                "count": len(entry.offers),
+                "age_s": age_s,
+                "stale": False,
+            }
+        else:
+            stale_entries[drive] = entry
+            pending.append(drive)
+
+    bucket: dict[str, list[StoreOffer]] = {}
+    worker = _store_worker(items, profile, browser_command, max_results, catalog, bucket)
+    _, statuses, errors = collect_offers_parallel(
+        pending, worker, timeout_seconds=timeout_seconds
+    )
+
+    aggregated: list[StoreOffer] = []
+    had_failure = False
+    for drive in unique_drives:
+        if drive in fresh_cache_offers:
+            cached = fresh_cache_offers[drive]
+            aggregated.extend(cached)
+            info = report[drive]
+            typer.echo(cache_report_line(drive, info["count"], age_s=info["age_s"], stale=False))
+            continue
+        status = statuses.get(drive, "timeout")
+        collected = bucket.get(drive, [])
+        if status == "ok":
+            aggregated.extend(collected)
+            typer.echo(f"Collecte {drive}: {len(collected)} offres")
+            if data_dir is not None and use_cache and collected:
+                save_offers_cache(
+                    data_dir, drive, items, collected, ttl_hours=effective_ttl
+                )
+                report[drive] = {
+                    "source": "collected",
+                    "count": len(collected),
+                    "age_s": 0.0,
+                    "stale": False,
+                }
+            else:
+                report[drive] = {
+                    "source": "collected",
+                    "count": len(collected),
+                    "age_s": None,
+                    "stale": False,
+                }
+            continue
+
+        had_failure = True
+        entry = stale_entries.get(drive)
+        if entry is not None and entry.offers:
+            entry_offers = list(entry.offers)
+            age_s = entry_age_seconds(entry, now=now)
             typer.echo(
-                f"Avertissement Managed Browser {drive}: {exc}; collecte ignorée pour ce drive.",
+                f"Avertissement {drive}: recollecte impossible ({errors.get(drive)}); "
+                "usage des offres en cache au-delà du TTL.",
                 err=True,
             )
+            aggregated.extend(entry_offers)
+            report[drive] = {
+                "source": "cache_stale",
+                "count": len(entry_offers),
+                "age_s": age_s,
+                "stale": True,
+            }
+            typer.echo(cache_report_line(drive, len(entry_offers), age_s=age_s, stale=True))
             continue
-        typer.echo(f"Collecte {drive}: {len(collected)} offres")
-        offers.extend(collected)
-    return offers, had_failure
+        report[drive] = {"source": str(status), "count": 0, "age_s": None, "stale": False}
+        _echo_collect_status(drive, status, 0, errors.get(drive), effective_timeout)
+
+    return aggregated, had_failure, report
 
 
 def _collect_drive_offers_with_optional_catalog(
@@ -1321,6 +1490,10 @@ def doctor_status_payload(data_dir: Path) -> dict:
         "price_cache": {
             "path": str(price_cache_path(data_dir)),
             "present": price_cache_path(data_dir).exists(),
+        },
+        "offers_cache": {
+            "path": str(offers_cache_dir(data_dir)),
+            "present": offers_cache_dir(data_dir).exists(),
         },
     }
     next_actions: list[str] = []
@@ -2158,6 +2331,26 @@ def plan(
             help="Dry-run par défaut: n'ajoute rien réellement.",
         ),
     ] = True,
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Forcer une collecte fraîche, ignorer le cache offres."),
+    ] = False,
+    cache_ttl_hours: Annotated[
+        float | None,
+        typer.Option(
+            "--cache-ttl-hours",
+            min=0.01,
+            help="TTL du cache offres en heures (défaut 6, env PANIER_CACHE_TTL_HOURS).",
+        ),
+    ] = None,
+    collect_timeout_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--collect-timeout-seconds",
+            min=0.1,
+            help="Timeout global du cycle de collecte (env PANIER_COLLECT_TIMEOUT_SECONDS).",
+        ),
+    ] = None,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2194,24 +2387,31 @@ def plan(
 
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
+    cache_report: dict[str, dict] = {}
     if collect:
-        drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
-        offers, collect_had_failure = collect_offers_for_drives(
+        offers, collect_had_failure, cache_report = collect_offers_with_cache(
             items,
-            drives,
+            [drive.strip() for drive in collect.split(",") if drive.strip()],
             profile=profile,
             browser_command=browser_command,
             max_results=max_results,
             catalog=load_catalog(data_dir),
+            data_dir=data_dir,
+            use_cache=not no_cache,
+            ttl_hours=cache_ttl_hours,
+            timeout_seconds=collect_timeout_seconds,
         )
         if collect_output is not None:
+            payload_offers: dict[str, object] = {
+                "offers": [offer.model_dump(mode="json") for offer in offers]
+            }
+            if not no_cache:
+                payload_offers["cache"] = [
+                    {"store": store, **info} for store, info in sorted(cache_report.items())
+                ]
             collect_output.parent.mkdir(parents=True, exist_ok=True)
             collect_output.write_text(
-                yaml.safe_dump(
-                    {"offers": [offer.model_dump(mode="json") for offer in offers]},
-                    allow_unicode=True,
-                    sort_keys=False,
-                ),
+                yaml.safe_dump(payload_offers, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
             typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")
@@ -2482,6 +2682,26 @@ def week(
     min_balance_score: Annotated[
         int | None, typer.Option("--min-balance-score", min=0, max=100)
     ] = None,
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Forcer une collecte fraîche, ignorer le cache offres."),
+    ] = False,
+    cache_ttl_hours: Annotated[
+        float | None,
+        typer.Option(
+            "--cache-ttl-hours",
+            min=0.01,
+            help="TTL du cache offres en heures (défaut 6, env PANIER_CACHE_TTL_HOURS).",
+        ),
+    ] = None,
+    collect_timeout_seconds: Annotated[
+        float | None,
+        typer.Option(
+            "--collect-timeout-seconds",
+            min=0.1,
+            help="Timeout global du cycle de collecte (env PANIER_COLLECT_TIMEOUT_SECONDS).",
+        ),
+    ] = None,
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2515,24 +2735,31 @@ def week(
 
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
+    cache_report: dict[str, dict] = {}
     if collect:
-        drives = [drive.strip() for drive in collect.split(",") if drive.strip()]
-        offers, collect_had_failure = collect_offers_for_drives(
+        offers, collect_had_failure, cache_report = collect_offers_with_cache(
             items,
-            drives,
+            [drive.strip() for drive in collect.split(",") if drive.strip()],
             profile=profile,
             browser_command=browser_command,
             max_results=max_results,
             catalog=load_catalog(data_dir),
+            data_dir=data_dir,
+            use_cache=not no_cache,
+            ttl_hours=cache_ttl_hours,
+            timeout_seconds=collect_timeout_seconds,
         )
         if collect_output is not None:
+            payload_offers: dict[str, object] = {
+                "offers": [offer.model_dump(mode="json") for offer in offers]
+            }
+            if not no_cache:
+                payload_offers["cache"] = [
+                    {"store": store, **info} for store, info in sorted(cache_report.items())
+                ]
             collect_output.parent.mkdir(parents=True, exist_ok=True)
             collect_output.write_text(
-                yaml.safe_dump(
-                    {"offers": [offer.model_dump(mode="json") for offer in offers]},
-                    allow_unicode=True,
-                    sort_keys=False,
-                ),
+                yaml.safe_dump(payload_offers, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
             typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")

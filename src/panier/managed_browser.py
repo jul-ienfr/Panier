@@ -36,6 +36,25 @@ def default_runner(
     )
 
 
+class TimeoutRunner:
+    """Runner bornant chaque invocation navigateur (anti-hang)."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def __call__(
+        self, args: list[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            args,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=self.timeout_seconds,
+        )
+
+
 class ManagedBrowserClient:
     """Client fin autour du wrapper Managed Browser local.
 
@@ -57,6 +76,14 @@ class ManagedBrowserClient:
         )
         self.profile = profile
         self.site = site
+        if runner is default_runner:
+            timeout = os.environ.get("PANIER_BROWSER_COMMAND_TIMEOUT")
+            try:
+                timeout_seconds = float(timeout) if timeout else 120.0
+            except ValueError:
+                timeout_seconds = 120.0
+            if timeout_seconds > 0:
+                runner = TimeoutRunner(timeout_seconds)
         self.runner = runner
 
     def status(self) -> BrowserCommandResult:
@@ -115,6 +142,10 @@ class ManagedBrowserClient:
             raise ManagedBrowserError(
                 f"Managed Browser introuvable: {command_args[0]}. "
                 "Configure PANIER_MANAGED_BROWSER_COMMAND."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ManagedBrowserError(
+                f"Managed Browser trop lent (> {exc.timeout:g}s) : {args[0]} abandonné."
             ) from exc
         if completed.returncode != 0:
             detail = self._error_detail(completed)

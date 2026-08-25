@@ -1023,10 +1023,11 @@ def test_plan_collects_multiple_drives_and_recommends(monkeypatch, tmp_path: Pat
     )
 
     assert result.exit_code == 0
-    assert [call[0] for call in calls] == ["leclerc", "auchan"]
+    assert sorted(call[0] for call in calls) == ["auchan", "leclerc"]
     assert calls[0][1] == [ShoppingItem(name="emmental râpé", quantity=400, unit="g")]
     assert output.exists()
     assert "Collecte leclerc: 1 offres" in result.output
+    assert "Collecte auchan: 1 offres" in result.output
     assert "Emmental leclerc" in result.output
     assert "6.99 €/kg" in result.output
 
