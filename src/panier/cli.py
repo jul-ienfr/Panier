@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-import click
 import typer
 import yaml
 
@@ -996,6 +995,9 @@ def echo_json(payload: dict) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+_cli_no_llm = False
+
+
 @app.callback()
 def main(
     version: Annotated[bool, typer.Option("--version", help="Afficher la version.")] = False,
@@ -1008,16 +1010,15 @@ def main(
         ),
     ] = False,
 ) -> None:
-    if no_llm:
-        click.get_current_context().obj = {"no_llm": True}
+    global _cli_no_llm
+    _cli_no_llm = bool(no_llm)
     if version:
         typer.echo(__version__)
         raise typer.Exit()
 
 
 def current_cli_no_llm() -> bool:
-    obj = click.get_current_context().find_root().obj
-    return bool(isinstance(obj, dict) and obj.get("no_llm"))
+    return _cli_no_llm
 
 
 @llm_app.command("status")
