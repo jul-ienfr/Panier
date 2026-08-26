@@ -1442,8 +1442,11 @@ def current_cli_no_llm() -> bool:
 
 
 @llm_app.command("status")
-def llm_status() -> None:
+def llm_status(output_format: OutputFormat = "text") -> None:
     status = no_llm_status(cli_no_llm=current_cli_no_llm())
+    if normalize_output_format(output_format) == "json":
+        echo_json({"mode": status.mode, "no_llm": status.no_llm, "guard": NO_LLM_ENV_VAR, "source": status.source, "raw_value": status.raw_value, "llm_calls_implemented": False})
+        return
     typer.echo(f"Mode: {status.mode}")
     typer.echo(f"LLM autorisé: {'non' if status.no_llm else 'oui'}")
     typer.echo(f"Garde-fou: {NO_LLM_ENV_VAR}")
@@ -1456,8 +1459,12 @@ def llm_status() -> None:
 @explain_app.command("item")
 def explain_item_command(
     name: Annotated[str, typer.Argument(help="Nom d'ingrédient ou produit à expliquer")],
+    output_format: OutputFormat = "text",
 ) -> None:
     explanation = explain_item(name)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"input_name": explanation.input_name, "canonical_name": explanation.canonical_name, "query": explanation.query, "confidence": explanation.confidence, "reason": explanation.reason})
+        return
     typer.echo(f"Entrée: {explanation.input_name}")
     typer.echo(f"Nom canonique: {explanation.canonical_name}")
     typer.echo(f"Requête: {explanation.query}")
@@ -1491,6 +1498,7 @@ def explain_offer_command(
     confidence: Annotated[str, typer.Option("--confidence")] = "medium",
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+    output_format: OutputFormat = "text",
 ) -> None:
     shopping_item = ShoppingItem(name=item)
     offer = StoreOffer(
@@ -1501,6 +1509,10 @@ def explain_offer_command(
         unit_price=unit_price,
         confidence=confidence,
     )
+    if normalize_output_format(output_format) == "json":
+        lines = list(explain_offer_lines(shopping_item, offer, compare_by=normalize_compare_by(compare_by), brand_preferences=load_brand_preferences(data_dir), substitutions=load_substitutions(data_dir)))
+        echo_json({"item": item, "product": product, "price": price, "store": store, "lines": lines})
+        return
     for line in explain_offer_lines(
         shopping_item,
         offer,
@@ -1515,42 +1527,62 @@ def explain_offer_command(
 def brand_prefer(
     brand: Annotated[str, typer.Argument(help="Marque à privilégier")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     _set_brand_preference(BrandPreferenceAction.PREFER, brand, data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"brand": brand, "action": "prefer"})
+        return
 
 
 @brand_app.command("avoid")
 def brand_avoid(
     brand: Annotated[str, typer.Argument(help="Marque à éviter sauf gros avantage prix")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     _set_brand_preference(BrandPreferenceAction.AVOID, brand, data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"brand": brand, "action": "avoid"})
+        return
 
 
 @brand_app.command("block")
 def brand_block(
     brand: Annotated[str, typer.Argument(help="Marque à exclure totalement")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     _set_brand_preference(BrandPreferenceAction.BLOCK, brand, data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"brand": brand, "action": "block"})
+        return
 
 
 @brand_app.command("remove")
 def brand_remove(
     brand: Annotated[str, typer.Argument(help="Marque à retirer des préférences")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     preferences = load_brand_preferences(data_dir)
     normalized = preferences.remove(brand)
     save_brand_preferences(data_dir, preferences)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"removed": normalized})
+        return
     typer.echo(f"Marque retirée: {normalized}")
 
 
 @brand_app.command("list")
 def brand_list(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     preferences = load_brand_preferences(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"prefer": sorted(preferences.prefer), "avoid": sorted(preferences.avoid), "block": sorted(preferences.block), "prefer_max_price_delta_eur": preferences.prefer_max_price_delta_eur, "prefer_max_price_delta_percent": preferences.prefer_max_price_delta_percent, "avoid_min_savings_eur": preferences.avoid_min_savings_eur, "avoid_min_savings_percent": preferences.avoid_min_savings_percent})
+        return
     typer.echo(f"Fichier: {brand_preferences_path(data_dir)}")
     for label, values in (
         ("prefer", preferences.prefer),
@@ -1574,8 +1606,12 @@ def brand_list(
 @brand_app.command("show")
 def brand_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     preferences = load_brand_preferences(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json(preferences.model_dump(mode="json"))
+        return
     typer.echo(
         yaml.safe_dump(
             preferences.model_dump(mode="json"),
@@ -1588,8 +1624,12 @@ def brand_show(
 @cache_app.command("show")
 def cache_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     cache = load_price_cache(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"offers": [o.model_dump(mode="json") for o in cache.offers]})
+        return
     typer.echo(f"Fichier: {price_cache_path(data_dir)}")
     typer.echo(f"Offres: {len(cache.offers)}")
     for offer in cache.offers:
@@ -1600,9 +1640,13 @@ def cache_show(
 def cache_import(
     prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     offers = load_offers(prices)
     cache = add_offers_to_cache(data_dir, offers)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"imported": len(offers), "total": len(cache.offers)})
+        return
     typer.echo(f"Offres importées: {len(offers)}")
     typer.echo(f"Cache: {price_cache_path(data_dir)} ({len(cache.offers)} offres)")
 
@@ -1612,10 +1656,14 @@ def substitution_add(
     item: Annotated[str, typer.Argument(help="Article source")],
     substitute: Annotated[str, typer.Argument(help="Article substitut")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     catalog = load_substitutions(data_dir)
     normalized_item, normalized_substitute = catalog.add(item, substitute)
     save_substitutions(data_dir, catalog)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"item": normalized_item, "substitute": normalized_substitute})
+        return
     typer.echo(f"Substitution ajoutée: {normalized_item} -> {normalized_substitute}")
 
 
@@ -1626,10 +1674,14 @@ def substitution_remove(
         str | None, typer.Argument(help="Substitut précis, sinon règle entière")
     ] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     catalog = load_substitutions(data_dir)
     normalized_item, normalized_substitute = catalog.remove(item, substitute)
     save_substitutions(data_dir, catalog)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"item": normalized_item, "substitute": normalized_substitute})
+        return
     if normalized_substitute:
         typer.echo(f"Substitution retirée: {normalized_item} -> {normalized_substitute}")
     else:
@@ -1639,8 +1691,12 @@ def substitution_remove(
 @substitution_app.command("list")
 def substitution_list(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     catalog = load_substitutions(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"substitutions": catalog.model_dump(mode="json")})
+        return
     typer.echo(f"Fichier: {substitutions_path(data_dir)}")
     if not catalog.rules:
         typer.echo("- aucune substitution")
@@ -1652,7 +1708,11 @@ def substitution_list(
 @constraint_app.command("show")
 def constraint_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    if normalize_output_format(output_format) == "json":
+        echo_json(load_constraints(data_dir).model_dump(mode="json"))
+        return
     typer.echo(
         yaml.safe_dump(
             load_constraints(data_dir).model_dump(mode="json"),
@@ -1670,6 +1730,7 @@ def constraint_set(
     max_items: Annotated[int | None, typer.Option("--max-items", min=1)] = None,
     blocked_store: Annotated[list[str] | None, typer.Option("--blocked-store")] = None,
     preferred_store: Annotated[list[str] | None, typer.Option("--preferred-store")] = None,
+    output_format: OutputFormat = "text",
 ) -> None:
     constraints = load_constraints(data_dir)
     payload = constraints.model_dump()
@@ -1686,6 +1747,9 @@ def constraint_set(
         payload["preferred_stores"] = [normalize_name(store) for store in preferred_store]
     updated = BasketConstraints.model_validate(payload)
     save_constraints(data_dir, updated)
+    if normalize_output_format(output_format) == "json":
+        echo_json(updated.model_dump(mode="json"))
+        return
     typer.echo("Contraintes sauvegardées")
 
 
@@ -1801,8 +1865,12 @@ def doctor_status(
 @doctor_app.command("determinism")
 def doctor_determinism(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     payload = doctor_status_payload(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json(payload)
+        return
     typer.echo("Diagnostic déterminisme Panier")
     typer.echo(f"Mode: {payload['mode']}")
     typer.echo(f"LLM autorisé: {'oui' if payload['llm_allowed'] else 'non'}")
@@ -1824,8 +1892,11 @@ def doctor_determinism(
 def init_project(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     force: Annotated[bool, typer.Option("--force", help="Réécrire les fichiers starter.")] = False,
+    output_format: OutputFormat = "text",
 ) -> None:
-    typer.echo("Initialisation Panier")
+    _json_init = normalize_output_format(output_format) == "json"
+    if not _json_init:
+        typer.echo("Initialisation Panier")
     profile = profile_path(data_dir)
     recipes = recipes_path(data_dir)
     pantry = pantry_path(data_dir)
@@ -1850,9 +1921,13 @@ def init_project(
         (pantry, Pantry()),
         (constraints, BasketConstraints()),
     ]
+    created: list[str] = []
+    skipped: list[str] = []
     for path, payload in targets:
         if path.exists() and not force:
-            typer.echo(f"déjà présent: {path}")
+            skipped.append(str(path))
+            if not _json_init:
+                typer.echo(f"déjà présent: {path}")
             continue
         if isinstance(payload, list):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1861,7 +1936,12 @@ def init_project(
             )
         else:
             dump_yaml(path, payload)
-        typer.echo(f"créé: {path}")
+        created.append(str(path))
+        if not _json_init:
+            typer.echo(f"créé: {path}")
+    if _json_init:
+        echo_json({"created": created, "skipped": skipped, "data_dir": str(data_dir)})
+        return
     typer.echo("Suite: panier doctor status puis panier plan --data-dir <dir>")
 
 
@@ -1870,7 +1950,9 @@ def doctor_drive(
     store: Annotated[str, typer.Argument(help="Drive à diagnostiquer: leclerc ou auchan")],
     profile: Annotated[str, typer.Option("--profile")] = "courses",
     browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_dd = normalize_output_format(output_format) == "json"
     normalized = normalize_name(store)
     browser = ManagedBrowserClient(
         command=browser_command,
@@ -1893,6 +1975,9 @@ def doctor_drive(
     except ManagedBrowserError as exc:
         typer.echo(f"Managed Browser indisponible: {exc}", err=True)
         raise typer.Exit(1) from exc
+    if _json_dd:
+        echo_json({"store": normalized, "profile": managed_browser_profile_for_drive(profile, normalized), "url": url, "status": status})
+        return
     _echo_cart_status(normalized, status)
     if normalized == "leclerc" and status.get("blocked_by"):
         typer.echo(
@@ -1904,12 +1989,16 @@ def doctor_drive(
 def profile_init(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     force: Annotated[bool, typer.Option("--force")] = False,
+    output_format: OutputFormat = "text",
 ) -> None:
     path = resolve_profile_file(data_dir)
     if path.exists() and not force:
         typer.echo(f"Profil déjà présent : {path}")
         return
     save_effective_profile(data_dir, FoodProfile())
+    if normalize_output_format(output_format) == "json":
+        echo_json({"profile": str(path)})
+        return
     typer.echo(f"Profil créé : {path}")
 
 
@@ -1956,6 +2045,7 @@ def profile_create(
         ),
     ] = False,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     path = household_path(data_dir, name)
     if path.exists():
@@ -1977,6 +2067,9 @@ def profile_create(
         preferences=preferences,
     )
     saved = save_household(data_dir, household)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"household": household.model_dump(mode="json"), "path": str(saved)})
+        return
     typer.echo(f"Foyer créé : {saved}")
     _echo_household_meta(household)
 
@@ -1984,7 +2077,13 @@ def profile_create(
 @profile_app.command("list")
 def profile_list(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    if normalize_output_format(output_format) == "json":
+        names = list_households(data_dir)
+        active = active_household_name(data_dir)
+        echo_json({"households": [{"name": n, "active": n == active} for n in names], "active": active})
+        return
     names = list_households(data_dir)
     active = active_household_name(data_dir)
     base_path = profile_path(data_dir)
@@ -2011,19 +2110,27 @@ def profile_list(
 def profile_use(
     name: Annotated[str, typer.Argument()],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     try:
         set_active_household(data_dir, name)
     except HouseholdError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if normalize_output_format(output_format) == "json":
+        echo_json({"active": slugify(name)})
+        return
     typer.echo(f"Foyer actif : {slugify(name)}")
 
 
 @profile_app.command("unuse")
 def profile_unuse(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     set_active_household(data_dir, None)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"active": None})
+        return
     typer.echo("Retour au profil de base (profile.yaml)")
 
 
@@ -2035,6 +2142,7 @@ def profile_remove(
         typer.Option("--force", help="Autoriser la suppression du foyer actif"),
     ] = False,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     slug = slugify(name)
     path = household_path(data_dir, name)
@@ -2047,6 +2155,9 @@ def profile_remove(
     path.unlink()
     if active_household_name(data_dir) == slug:
         set_active_household(data_dir, None)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"removed": slug})
+        return
     typer.echo(f"Foyer supprimé : {slug}")
 
 
@@ -2066,6 +2177,7 @@ def profile_set(
     clear_geo: Annotated[bool, typer.Option("--clear-geo-zone")] = False,
     clear_budget: Annotated[bool, typer.Option("--clear-budget")] = False,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     target = name or active_household_name(data_dir)
     if target is None:
@@ -2103,6 +2215,9 @@ def profile_set(
         return
     updated = household.model_copy(update=updates)
     save_household(data_dir, updated)
+    if normalize_output_format(output_format) == "json":
+        echo_json(updated.model_dump(mode="json"))
+        return
     typer.echo(f"Foyer mis à jour : {updated.name}")
     _echo_household_meta(updated)
 
@@ -2110,7 +2225,13 @@ def profile_set(
 @profile_app.command("show")
 def profile_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    if normalize_output_format(output_format) == "json":
+        household = load_active_household(data_dir)
+        profile = load_profile(data_dir)
+        echo_json({"household": household.model_dump(mode="json") if household else None, "profile": profile.model_dump(mode="json")})
+        return
     household = load_active_household(data_dir)
     if household is not None:
         _echo_household_meta(household)
@@ -2263,7 +2384,9 @@ def profile_allergy(
     ] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "allergies",
         action,
@@ -2274,6 +2397,8 @@ def profile_allergy(
         status=status,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "allergies", "action": action, "value": normalize_name(value)})
 
 
 @profile_app.command("dislike")
@@ -2288,7 +2413,9 @@ def profile_dislike(
     ] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "dislikes",
         action,
@@ -2299,6 +2426,8 @@ def profile_dislike(
         status=status,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "dislikes", "action": action, "value": normalize_name(value)})
 
 
 @profile_app.command("forbid")
@@ -2313,7 +2442,9 @@ def profile_forbid(
     ] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "forbidden",
         action,
@@ -2324,6 +2455,8 @@ def profile_forbid(
         status=status,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "forbidden", "action": action, "value": normalize_name(value)})
 
 
 @profile_app.command("like")
@@ -2338,7 +2471,9 @@ def profile_like(
     ] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "likes",
         action,
@@ -2349,6 +2484,8 @@ def profile_like(
         status=status,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "likes", "action": action, "value": normalize_name(value)})
 
 
 @profile_app.command("accept-recipe")
@@ -2359,7 +2496,9 @@ def profile_accept_recipe(
     confidence: Annotated[str | None, typer.Option("--confidence")] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "accepted_recipes",
         action,
@@ -2369,6 +2508,8 @@ def profile_accept_recipe(
         confidence=confidence,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "accepted_recipes", "action": action, "value": normalize_name(value)})
 
 
 @profile_app.command("reject-recipe")
@@ -2383,7 +2524,9 @@ def profile_reject_recipe(
     ] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     _profile_preference_command(
         "rejected_recipes",
         action,
@@ -2394,26 +2537,39 @@ def profile_reject_recipe(
         status=status,
         source=source,
     )
+    if _json:
+        echo_json({"kind": "rejected_recipes", "action": action, "value": normalize_name(value)})
 
 
 @pantry_app.command("init")
 def pantry_init(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     force: Annotated[bool, typer.Option("--force")] = False,
+    output_format: OutputFormat = "text",
 ) -> None:
     path = pantry_path(data_dir)
     if path.exists() and not force:
+        if normalize_output_format(output_format) == "json":
+            echo_json({"path": str(path), "created": False})
+            return
         typer.echo(f"Stock déjà présent : {path}")
         return
     dump_yaml(path, Pantry())
+    if normalize_output_format(output_format) == "json":
+        echo_json({"path": str(path), "created": True})
+        return
     typer.echo(f"Stock créé : {path}")
 
 
 @pantry_app.command("list")
 def pantry_list(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     pantry = load_pantry(data_dir)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit, "min_quantity": i.min_quantity, "min_unit": i.min_unit} for i in pantry.items]})
+        return
     if not pantry.items:
         typer.echo("Stock vide")
         return
@@ -2437,6 +2593,7 @@ def pantry_add(
         str | None, typer.Option("--min", help="Seuil de réachat, ex: 300g ou 1kg")
     ] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     pantry = load_pantry(data_dir)
     min_quantity = None
@@ -2461,6 +2618,9 @@ def pantry_add(
     if not matched:
         pantry.items.append(item)
     save_pantry(data_dir, pantry)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"added": {"name": item.name, "quantity": item.quantity, "unit": item.unit}, "count": len(pantry.items)})
+        return
     typer.echo(f"Stock ajouté : {format_item(item)}")
 
 
@@ -2470,6 +2630,7 @@ def pantry_remove(
     quantity: Annotated[float | None, typer.Option("--quantity", "-q", min=0)] = None,
     unit: Annotated[str | None, typer.Option("--unit", "-u")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     pantry = load_pantry(data_dir)
     item = ShoppingItem(name=name, quantity=quantity, unit=unit)
@@ -2488,6 +2649,9 @@ def pantry_remove(
             remaining.append(existing)
     pantry.items = remaining
     save_pantry(data_dir, pantry)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"removed": removed, "item": {"name": item.name, "quantity": item.quantity, "unit": item.unit}, "count": len(pantry.items)})
+        return
     if removed:
         typer.echo(f"Stock retiré : {format_item(item)}")
     else:
@@ -2498,8 +2662,12 @@ def pantry_remove(
 def pantry_need(
     recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     missing = subtract_pantry(recipe_items(load_recipe_file(recipe)), load_pantry(data_dir))
+    if normalize_output_format(output_format) == "json":
+        echo_json({"missing": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in missing]})
+        return
     echo_items("Manquant:", missing)
 
 
@@ -2507,10 +2675,15 @@ def pantry_need(
 def pantry_consume(
     recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     requested = recipe_items(load_recipe_file(recipe))
     updated, missing = consume_pantry(requested, load_pantry(data_dir))
     save_pantry(data_dir, updated)
+    if normalize_output_format(output_format) == "json":
+        consumed = subtract_pantry(requested, Pantry(items=missing))
+        echo_json({"consumed": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in consumed], "missing": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in missing], "low_stock": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in low_stock_items(updated)]})
+        return
     consumed = subtract_pantry(requested, Pantry(items=missing))
     echo_items("Consommé:", consumed)
     if missing:
@@ -2524,12 +2697,24 @@ def pantry_consume(
 def shopping_from_recipe(
     recipe: Annotated[Path, typer.Argument(help="YAML recette: {name, ingredients}")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
 ) -> None:
     items = subtract_pantry(recipe_items(load_recipe_file(recipe)), load_pantry(data_dir))
+    if normalize_output_format(output_format) == "json":
+        payload2: dict = {"items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items]}
+        if prices is not None and items:
+            comparison = normalize_compare_by(compare_by)
+            try:
+                rec2 = recommend_basket(items, load_offers(prices), mode=mode, max_stores=max_stores, compare_by=comparison, brand_preferences=load_brand_preferences(data_dir))
+                payload2["recommendation"] = {"stores": rec2.stores, "total": rec2.total}
+            except Exception:
+                pass
+        echo_json(payload2)
+        return
     echo_items("Liste à acheter:", items)
     if prices is None or not items:
         return
@@ -2561,9 +2746,14 @@ def drive_plan(
     data_dir: Annotated[
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     items = read_shopping_items(shopping_list)
     catalog = load_catalog(data_dir)
+    if normalize_output_format(output_format) == "json":
+        plan = build_drive_search_plan(items, drive, catalog=catalog)
+        echo_json({"drive": drive, "items": [{"name": e.item.name, "quantity": e.item.quantity, "unit": e.item.unit, "query": e.query, "confidence": e.confidence} for e in plan]})
+        return
     echo_items("Liste drive:", items)
     typer.echo("\nRecherches à lancer:")
     for entry in build_drive_search_plan(items, drive, catalog=catalog):
@@ -2583,7 +2773,12 @@ def drive_open(
     data_dir: Annotated[
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    if normalize_output_format(output_format) == "json":
+        _j = read_shopping_items(shopping_list)
+        echo_json({"drive": drive, "items": [{"name": i.name} for i in _j]})
+        return
     items = read_shopping_items(shopping_list)
     catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
@@ -2612,10 +2807,16 @@ def drive_pick(
     prices: Annotated[Path, typer.Argument(help="YAML: offers: [...]")],
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     items = read_shopping_items(shopping_list)
     offers = load_offers(prices)
     comparison = normalize_compare_by(compare_by)
+    if normalize_output_format(output_format) == "json":
+        from panier.selection import pick_best_offers
+        best = pick_best_offers(items, offers, compare_by=comparison)
+        echo_json({"picks": [{"item": k, "product": v.product if v else None, "price": v.price if v else None, "store": v.store if v else None} for k, v in best.items()]})
+        return
     items, offers, _constraints = prepare_items_and_offers(items, offers, data_dir)
     typer.echo("Meilleurs produits:")
     for item in items:
@@ -2646,7 +2847,9 @@ def drive_collect(
     data_dir: Annotated[
         Path, typer.Option("--data-dir", help="Répertoire données Panier")
     ] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_collect = normalize_output_format(output_format) == "json" 
     items = read_shopping_items(shopping_list)
     resolved_profile = managed_browser_profile_for_drive(profile, site or drive)
     catalog = load_catalog(data_dir)
@@ -2669,6 +2872,9 @@ def drive_collect(
     if offers:
         _record_history(data_dir, drive, offers)
     payload = {"offers": [offer.model_dump(mode="json") for offer in offers]}
+    if _json_collect:
+        echo_json({"drive": drive, "offers": payload["offers"], "count": len(offers), "output": str(output) if output else None})
+        return
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
@@ -2774,7 +2980,9 @@ def recipe_list(
         Path | None,
         typer.Option("--prices", help="YAML prioritaire pour les coûts: offers: [...]"),
     ] = None,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_rl = normalize_output_format(output_format) == "json" 
     if balanced and min_balance_score is None:
         min_balance_score = 70
     include = parse_csv_set(include_tags)
@@ -2788,6 +2996,13 @@ def recipe_list(
         cost_level=cost_level,
         min_balance_score=min_balance_score,
     )
+    if _json_rl:
+        if sort_cost:
+            costs = _sorted_recipes_by_cost(recipes, data_dir=data_dir, prices=prices)
+            echo_json({"recipes": [{"name": c.recipe.name, "tags": c.recipe.tags, "servings": c.recipe.servings, "prep_minutes": c.recipe.prep_minutes, "cost_level": c.recipe.cost_level, "total": c.total} for c in costs], "count": len(costs)})
+            return
+        echo_json({"recipes": [{"name": r.name, "tags": r.tags, "servings": r.servings, "prep_minutes": r.prep_minutes, "cost_level": r.cost_level, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in r.ingredients]} for r in recipes], "count": len(recipes)})
+        return
     if not recipes:
         typer.echo("Aucune recette")
         return
@@ -2818,10 +3033,15 @@ def recipe_list(
 def recipe_score(
     name: Annotated[str, typer.Argument()],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     recipe = find_recipe(load_recipes(data_dir), name)
+    score = score_recipe_balance(recipe)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"recipe": recipe.name, "balance": {"score": score.score, "verdict": score.verdict, "details": score.details if hasattr(score, 'details') else None}})
+        return
     typer.echo(recipe.name)
-    typer.echo(format_balance_score(score_recipe_balance(recipe)))
+    typer.echo(format_balance_score(score))
 
 
 @recipe_app.command("add")
@@ -2840,6 +3060,7 @@ def recipe_add(
     prep_minutes: Annotated[int | None, typer.Option("--prep-minutes", min=1)] = None,
     cost_level: Annotated[str | None, typer.Option("--cost-level")] = None,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     source_path = Path(source)
     if source_path.exists():
@@ -2867,6 +3088,9 @@ def recipe_add(
         recipes.append(recipe)
         existing.add(normalize_name(recipe.name))
     save_recipes(data_dir, recipes)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"added": [{"name": r.name, "servings": r.servings, "tags": r.tags, "prep_minutes": r.prep_minutes, "cost_level": r.cost_level, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in r.ingredients]} for r in new_recipes], "count": len(new_recipes)})
+        return
     for recipe in new_recipes:
         typer.echo(f"Recette ajoutée : {recipe.name}")
 
@@ -2875,8 +3099,12 @@ def recipe_add(
 def recipe_show(
     name: Annotated[str, typer.Argument()],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     recipe = find_recipe(load_recipes(data_dir), name)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"recipe": {"name": recipe.name, "servings": recipe.servings, "tags": recipe.tags, "prep_minutes": recipe.prep_minutes, "cost_level": recipe.cost_level, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in recipe.ingredients]}})
+        return
     typer.echo(recipe.name)
     typer.echo(f"Portions: {recipe.servings}")
     if recipe.tags:
@@ -2898,6 +3126,7 @@ def recipe_show(
 def recipe_remove(
     name: Annotated[str, typer.Argument()],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
 ) -> None:
     recipes = load_recipes(data_dir)
     normalized_name = normalize_name(name)
@@ -2906,6 +3135,9 @@ def recipe_remove(
         typer.echo(f"Recette introuvable : {name}")
         return
     save_recipes(data_dir, kept)
+    if normalize_output_format(output_format) == "json":
+        echo_json({"removed": name, "remaining": len(kept)})
+        return
     typer.echo(f"Recette supprimée : {name}")
 
 
@@ -2914,6 +3146,7 @@ def recipe_shopping(
     names: Annotated[list[str], typer.Argument(help="Noms des recettes à consolider")],
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
+    output_format: OutputFormat = "text",
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
     compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
@@ -2921,6 +3154,17 @@ def recipe_shopping(
     recipes = selected_recipes(data_dir, names)
     pantry = load_pantry_if_exists(data_dir)
     items = shopping_items_for_recipes(recipes, pantry)
+    if normalize_output_format(output_format) == "json":
+        payload: dict = {"recipes": [r.name for r in recipes], "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items]}
+        if prices is not None and items:
+            comparison = normalize_compare_by(compare_by)
+            try:
+                rec = recommend_basket(items, load_offers(prices), mode=mode, max_stores=max_stores, compare_by=comparison, brand_preferences=load_brand_preferences(data_dir))
+                payload["recommendation"] = {"stores": rec.stores, "total": rec.total, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None} for bi in rec.by_item]}
+            except Exception:
+                pass
+        echo_json(payload)
+        return
     echo_recipe_selection(recipes)
     echo_items("\nListe à acheter:", items)
     if prices is None or not items:
@@ -2970,6 +3214,7 @@ def recipe_suggest(
         Path | None,
         typer.Option("--prices", help="YAML prioritaire pour les coûts: offers: [...]"),
     ] = None,
+    output_format: OutputFormat = "text",
 ) -> None:
     if balanced and min_balance_score is None:
         min_balance_score = 70
@@ -2995,6 +3240,23 @@ def recipe_suggest(
         cost_level=cost_level,
         min_balance_score=min_balance_score,
     )
+    if normalize_output_format(output_format) == "json":
+        out = []
+        for r in selected:
+            entry: dict = {"name": r.name, "tags": r.tags, "servings": r.servings, "prep_minutes": r.prep_minutes, "cost_level": r.cost_level, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in r.ingredients]}
+            if balanced or min_balance_score is not None:
+                sc = score_recipe_balance(r)
+                entry["balance"] = {"score": sc.score, "verdict": sc.verdict}
+            if normalize_name(r.name) in cost_suffix_by_name:
+                # cost known; include total if computable
+                try:
+                    c = compute_recipe_cost(r, data_dir=data_dir, prices_offers=offers)
+                    entry["total"] = c.total
+                except Exception:
+                    pass
+            out.append(entry)
+        echo_json({"recipes": out, "count": len(out)})
+        return
     for recipe in selected:
         suffix = ""
         if balanced or min_balance_score is not None:
@@ -3084,7 +3346,9 @@ def plan(
             help="Bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json = normalize_output_format(output_format) == "json"
     if balanced and min_balance_score is None:
         min_balance_score = 70
     profile_data = load_profile(data_dir)
@@ -3104,19 +3368,32 @@ def plan(
         if pantry is not None:
             items = subtract_pantry(items, pantry)
 
-    typer.echo("Recettes retenues:")
-    for recipe in selected:
-        suffix = ""
-        if balanced or min_balance_score is not None:
-            score = score_recipe_balance(recipe)
-            suffix = f" — équilibre {score.score}/100 ({score.verdict})"
-        typer.echo(f"- {recipe.name}{suffix}")
-    typer.echo("\nÀ acheter:")
-    if not items:
-        typer.echo("- rien à acheter")
-        return
-    for item in items:
-        typer.echo(f"- {format_item(item)}")
+    if _json:
+        # short-circuit collecte is deferred — payload below after recommendation/offers resolved
+        _selected = [{"name": r.name, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in r.ingredients], "tags": r.tags} for r in selected]
+        _items = [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items]
+        if not _items:
+            echo_json({"recipes": _selected, "items": [], "offers": [], "recommendation": None})
+            return
+        # continue to offers/recommendation branch with json flag
+        pass
+    if not _json:
+        typer.echo("Recettes retenues:")
+        for recipe in selected:
+            suffix = ""
+            if balanced or min_balance_score is not None:
+                score = score_recipe_balance(recipe)
+                suffix = f" — équilibre {score.score}/100 ({score.verdict})"
+            typer.echo(f"- {recipe.name}{suffix}")
+        typer.echo("\nÀ acheter:")
+        if not items:
+            typer.echo("- rien à acheter")
+            return
+        for item in items:
+            typer.echo(f"- {format_item(item)}")
+    elif not items:
+        # handled above via _items short-circuit; shouldn't reach here
+        pass
 
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
@@ -3152,8 +3429,13 @@ def plan(
         offers = load_offers(prices)
 
     if offers is None:
+        if _json:
+            echo_json({"recipes": [{"name": r.name, "ingredients": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in r.ingredients], "tags": r.tags} for r in selected], "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items], "offers": [], "recommendation": None})
         return
     if not offers and collect_had_failure:
+        if _json:
+            echo_json({"recipes": [{"name": r.name} for r in selected], "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items], "offers": [], "error": "aucune offre collectée", "recommendation": None})
+            return
         typer.echo(
             "Recommandation indisponible: aucune offre collectée; "
             "voir les avertissements Managed Browser.",
@@ -3164,6 +3446,22 @@ def plan(
     comparison = normalize_compare_by(compare_by)
     items, offers, constraints = prepare_items_and_offers(items, offers, data_dir)
     brand_preferences = load_brand_preferences(data_dir)
+    if _json:
+        try:
+            recommendation = recommend_basket(
+                items, offers, mode=mode, max_stores=max_stores,
+                compare_by=comparison, brand_preferences=brand_preferences,
+            )
+        except ValueError as exc:
+            echo_json({"recipes": [{"name": r.name} for r in selected], "items": [{"name": i.name} for i in items], "offers": [o.model_dump(mode="json") for o in offers], "recommendation": None, "error": str(exc)})
+            return
+        echo_json({
+            "recipes": [{"name": r.name} for r in selected],
+            "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
+            "offers": [o.model_dump(mode="json") for o in offers],
+            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None, "unit_price": bi.offer.unit_price if bi.offer else None} for bi in recommendation.by_item]},
+        })
+        return
     echo_basket_options(
         items,
         offers,
@@ -3306,7 +3604,9 @@ def cart_add(
     profile: Annotated[str, typer.Option("--profile")] = "courses",
     browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
     cart_dry_run: Annotated[bool, typer.Option("--cart-dry-run/--cart-live")] = True,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_ca = normalize_output_format(output_format) == "json" 
     try:
         run = load_cart_run(data_dir, run_id)
     except FileNotFoundError as exc:
@@ -3328,6 +3628,9 @@ def cart_add(
         grouped_lines=run.grouped_lines,
         results=results,
     )
+    if _json_ca:
+        echo_json({"run_id": str(path), "action": "add", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else dict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
+        return
     typer.echo(f"Run panier sauvegardé: {path}")
 
 
@@ -3338,7 +3641,9 @@ def cart_remove(
     profile: Annotated[str, typer.Option("--profile")] = "courses",
     browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
     cart_dry_run: Annotated[bool, typer.Option("--cart-dry-run/--cart-live")] = True,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_cr = normalize_output_format(output_format) == "json" 
     try:
         run = load_cart_run(data_dir, run_id)
     except FileNotFoundError as exc:
@@ -3362,6 +3667,9 @@ def cart_remove(
         grouped_lines=run.grouped_lines,
         results=results,
     )
+    if _json_cr:
+        echo_json({"run_id": str(path), "action": "remove", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else dict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
+        return
     typer.echo(f"Run panier sauvegardé: {path}")
 
 
@@ -3379,25 +3687,36 @@ def cart_sync(
             "--apply", help="Réservé: le sync reste dry-run tant que le diff n'est pas confirmé."
         ),
     ] = False,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_cs = normalize_output_format(output_format) == "json"
+    _sync_payload: dict[str, Any] = {"run_id": run_id, "diffs": {}} 
     if apply:
         raise typer.BadParameter(
             "cart sync est en dry-run uniquement; "
             "utilise cart add/remove --cart-live après vérification."
         )
     run = load_cart_run(data_dir, run_id)
+    _sync_payload["run_id"] = run.id
     for store, lines in run.grouped_lines.items():
         status = run_cart_status_for_store(
             store, lines, profile=profile, browser_command=browser_command
         )
-        _echo_cart_status(store, status)
         diff = cart_sync_diff(store, lines, status)
+        _sync_payload["diffs"][store] = {"status": status.model_dump(mode="json") if hasattr(status, "model_dump") else dict(status), "diff": diff.model_dump(mode="json") if hasattr(diff, "model_dump") else diff}
+        if _json_cs:
+            continue
+        _echo_cart_status(store, status)
         _echo_cart_sync_diff(store, diff)
+    if _json_cs:
+        echo_json(_sync_payload)
+        return
 
 
 @app.command("week")
 def week(
     meals: Annotated[int, typer.Option("--meals", min=1)] = 7,
+    output_format: OutputFormat = "text",
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     prices: Annotated[Path | None, typer.Option("--prices", help="YAML: offers: [...]")] = None,
     collect: Annotated[
@@ -3467,6 +3786,7 @@ def week(
         ),
     ] = None,
 ) -> None:
+    _json_week = normalize_output_format(output_format) == "json"
     if balanced and min_balance_score is None:
         min_balance_score = 70
     try:
@@ -3506,31 +3826,52 @@ def week(
         if pantry is not None:
             items = subtract_pantry(items, pantry)
 
-    typer.echo(f"Semaine: {len(selected)} repas")
+    if _json_week:
+        _week_assignments = [
+            {"day": a.day, "slot": a.slot, "recipe": a.recipe.name, "tags": a.recipe.tags}
+            for a in week_plan.assignments
+        ]
+        _week_items = [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items]
+        _week_unfilled = unfilled
+    else:
+        typer.echo(f"Semaine: {len(selected)} repas")
     prices_offers = load_offers(prices) if prices is not None else None
     costs_by_name: dict[str, RecipeCost] = {}
-    for assignment in week_plan.assignments:
-        score = score_recipe_balance(assignment.recipe)
-        label = WEEK_SLOT_LABELS[assignment.slot]
-        key = normalize_name(assignment.recipe.name)
-        if key not in costs_by_name:
-            costs_by_name[key] = compute_recipe_cost(
-                assignment.recipe, data_dir=data_dir, prices_offers=prices_offers
+    if _json_week:
+        for assignment in week_plan.assignments:
+            key = normalize_name(assignment.recipe.name)
+            if key not in costs_by_name:
+                costs_by_name[key] = compute_recipe_cost(
+                    assignment.recipe, data_dir=data_dir, prices_offers=prices_offers
+                )
+    else:
+        for assignment in week_plan.assignments:
+            score = score_recipe_balance(assignment.recipe)
+            label = WEEK_SLOT_LABELS[assignment.slot]
+            key = normalize_name(assignment.recipe.name)
+            if key not in costs_by_name:
+                costs_by_name[key] = compute_recipe_cost(
+                    assignment.recipe, data_dir=data_dir, prices_offers=prices_offers
+                )
+            typer.echo(
+                f"Jour {assignment.day} {label}: {assignment.recipe.name}"
+                f" — équilibre {score.score}/100 ({score.verdict})"
+                f"{_recipe_cost_suffix(costs_by_name[key])}"
             )
-        typer.echo(
-            f"Jour {assignment.day} {label}: {assignment.recipe.name}"
-            f" — équilibre {score.score}/100 ({score.verdict})"
-            f"{_recipe_cost_suffix(costs_by_name[key])}"
-        )
-    if unfilled > 0:
-        typer.echo(
-            f"Attention: {unfilled} slot(s) non pourvu(s) "
-            "(pas assez de recettes compatibles / cap de répétition atteint).",
-            err=True,
-        )
+        if unfilled > 0:
+            typer.echo(
+                f"Attention: {unfilled} slot(s) non pourvu(s) "
+                "(pas assez de recettes compatibles / cap de répétition atteint).",
+                err=True,
+            )
     priced_totals = [cost.total for cost in costs_by_name.values() if cost.total is not None]
     repeat_sum = sum(week_plan.counts.values())
-    if len(priced_totals) == len(costs_by_name) and costs_by_name:
+    if _json_week:
+        _week_costs = {
+            key: {"total": float(cost.total) if cost.total is not None else None, "per_servings": float(cost.per_servings()) if cost.per_servings() is not None else None, "partial_total": float(cost.partial_total), "unpriced": cost.unpriced, "costs": [{"name": c.name, "price": c.price, "source": c.source, "store": c.store} for c in cost.costs]}
+            for key, cost in costs_by_name.items()
+        }
+    elif len(priced_totals) == len(costs_by_name) and costs_by_name:
         total_cost = sum(
             float(costs_by_name[key].total) * count
             for key, count in week_plan.counts.items()
@@ -3551,12 +3892,18 @@ def week(
             f"Coût hebdo partiel: {partial:.2f} € "
             f"(coût inconnu pour: {', '.join(unpriced)})"
         )
-    typer.echo("\nÀ acheter:")
-    if not items:
-        typer.echo("- rien à acheter")
+    if _json_week and not items:
+        echo_json({"week": _week_assignments, "items": [], "unfilled": _week_unfilled, "costs": _week_costs, "offers": [], "recommendation": None})
         return
-    for item in items:
-        typer.echo(f"- {format_item(item)}")
+    if not _json_week:
+        typer.echo("\nÀ acheter:")
+    if not items:
+        if not _json_week:
+            typer.echo("- rien à acheter")
+        return
+    if not _json_week:
+        for item in items:
+            typer.echo(f"- {format_item(item)}")
 
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
@@ -3587,13 +3934,19 @@ def week(
                 yaml.safe_dump(payload_offers, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
-            typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")
+            if not _json_week:
+                typer.echo(f"Offres collectées: {len(offers)} -> {collect_output}")
     elif prices is not None:
         offers = load_offers(prices)
 
     if offers is None:
+        if _json_week:
+            echo_json({"week": _week_assignments, "items": _week_items, "unfilled": _week_unfilled, "costs": _week_costs, "offers": [], "recommendation": None})
         return
     if not offers and collect_had_failure:
+        if _json_week:
+            echo_json({"week": _week_assignments, "items": _week_items, "unfilled": _week_unfilled, "costs": _week_costs, "offers": [], "error": "aucune offre collectée", "recommendation": None})
+            return
         typer.echo(
             "Recommandation indisponible: aucune offre collectée; "
             "voir les avertissements Managed Browser.",
@@ -3603,13 +3956,14 @@ def week(
     comparison = normalize_compare_by(compare_by)
     items, offers, constraints = prepare_items_and_offers(items, offers, data_dir)
     brand_preferences = load_brand_preferences(data_dir)
-    echo_basket_options(
-        items,
-        offers,
-        max_stores=max_stores,
-        compare_by=comparison,
-        brand_preferences=brand_preferences,
-    )
+    if not _json_week:
+        echo_basket_options(
+            items,
+            offers,
+            max_stores=max_stores,
+            compare_by=comparison,
+            brand_preferences=brand_preferences,
+        )
     try:
         recommendation = recommend_basket(
             items,
@@ -3620,11 +3974,19 @@ def week(
             brand_preferences=brand_preferences,
         )
     except ValueError as exc:
+        if _json_week:
+            echo_json({"week": _week_assignments, "items": _week_items, "unfilled": _week_unfilled, "costs": _week_costs, "offers": [o.model_dump(mode="json") for o in offers], "error": str(exc), "recommendation": None})
+            return
         if collect:
             typer.echo(f"Recommandation indisponible: {exc}", err=True)
             return
         typer.echo(f"Recommandation indisponible: {exc}", err=True)
         raise typer.Exit(1) from exc
+    if _json_week:
+        rec = {"mode": recommendation.mode, "stores": recommendation.stores, "total": float(recommendation.total), "reason": recommendation.reason, "savings_vs_best_single": float(recommendation.savings_vs_best_single) if recommendation.savings_vs_best_single is not None else None, "by_item": [{"item": it.item.name if hasattr(it.item,"name") else str(it.item), "store": it.store, "price": float(it.price) if it.price is not None else None} for it in recommendation.by_item]}  # type: ignore[attr-defined]
+        issues = validate_recommendation_constraints(recommendation.total, len(recommendation.by_item), constraints)
+        echo_json({"week": _week_assignments, "items": _week_items, "unfilled": _week_unfilled, "costs": _week_costs, "offers": [o.model_dump(mode="json") for o in offers], "recommendation": rec, "constraint_issues": issues})
+        return
     echo_recommendation(
         items=items,
         recommendation_items=recommendation.by_item,
@@ -3664,12 +4026,31 @@ def compare(
             help="Afficher le bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    output_format: OutputFormat = "text",
 ) -> None:
+    _json_cmp = normalize_output_format(output_format) == "json"
     items = read_shopping_items(shopping_list)
     raw_offers = load_offers(prices) if prices is not None else load_price_cache(data_dir).offers
     comparison = normalize_compare_by(compare_by)
     items, offers, constraints = prepare_items_and_offers(items, raw_offers, data_dir)
     brand_preferences = load_brand_preferences(data_dir)
+    if _json_cmp:
+        try:
+            recommendation = recommend_basket(
+                items, offers, mode=mode, max_stores=max_stores,
+                compare_by=comparison, brand_preferences=brand_preferences,
+            )
+        except ValueError as exc:
+            echo_json({"items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items], "offers": [o.model_dump(mode="json") for o in offers], "recommendation": None, "error": str(exc)})
+            return
+        issues = validate_recommendation_constraints(recommendation.total, len(recommendation.by_item), constraints)
+        echo_json({
+            "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
+            "offers": [o.model_dump(mode="json") for o in offers],
+            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "reason": recommendation.reason, "savings_vs_best_single": recommendation.savings_vs_best_single, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None, "unit_price": bi.offer.unit_price if bi.offer else None} for bi in recommendation.by_item]},
+            "constraint_issues": issues,
+        })
+        return
     echo_basket_options(
         items,
         offers,
