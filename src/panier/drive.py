@@ -100,9 +100,19 @@ _DRIVE_BASE_URLS = {
 }
 
 _PRODUCT_EXTRACTION_JS = r"""
-(() => {
+(async () => {
+  /* Les catalogues hydratent leurs prix après le rendu initial : scroll de
+     réveil du lazy-loading puis stabilisation courte avant extraction. */
+  const settle = async () => {
+    window.scrollTo(0, Math.min(1200, document.body?.scrollHeight || 0));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    window.scrollTo(0, 0);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  };
+  try { await settle(); } catch (err) { /* scroll best-effort */ }
   const normalizedText = (node) => (node.textContent || '')
     .replace(/\u00a0/g, ' ')
+    .replace(/\u202f/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const leclercProductText = (node) => {
@@ -136,8 +146,7 @@ _PRODUCT_EXTRACTION_JS = r"""
     const own = node.textContent || '';
     const match = own.match(/\d+[\d\s.,]*\s*€/);
     return match ? match[0].trim() : '';
-  };
-  const unitText = (node) => {
+  };  const unitText = (node) => {
     const leclerc = leclercProductText(node);
     if (leclerc?.unitPrice) return leclerc.unitPrice;
     const text = node.textContent || '';
@@ -466,11 +475,29 @@ def _parse_euro_price(value: object) -> float | None:
         return None
     if isinstance(value, int | float):
         return float(value) if value > 0 else None
-    text = str(value).replace("\xa0", " ").strip()
-    match = re.search(r"(\d+(?:[\s.]\d{3})*(?:[,.]\d{1,2})?|\d+)", text)
+    text = str(value).replace("\xa0", " ").replace("\u202f", " ").strip()
+    match = re.search(r"(\d+(?:[\s.,]\d{3})*(?:[,.]\d{1,2})?|\d+)", text)
     if not match:
         return None
-    number = match.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+    number = match.group(1).replace(" ", "")
+    # Formats mixtes : le séparateur le plus à droite est la décimale.
+    if "," in number and "." in number:
+        if number.rfind(",") > number.rfind("."):
+            number = number.replace(".", "").replace(",", ".")
+        else:
+            number = number.replace(",", "")
+    elif "," in number:
+        head, _, tail = number.rpartition(",")
+        if len(tail) in (1, 2):
+            number = f"{head.replace(',', '')}.{tail}"
+        else:
+            number = head.replace(",", "") + tail
+    elif "." in number:
+        head, _, tail = number.rpartition(".")
+        if len(tail) in (1, 2):
+            number = f"{head.replace('.', '')}.{tail}"
+        else:
+            number = head.replace(".", "") + tail
     try:
         parsed = float(number)
     except ValueError:
