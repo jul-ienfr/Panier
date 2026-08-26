@@ -51,6 +51,7 @@ def test_render_html_escapes_and_uses_structured_layout() -> None:
     assert "Aucun candidat détecté" in html
     assert 'class="chip' in html
     assert "active_household" not in html
+    assert "Interface v2" in html
 
 
 def test_render_html_shows_promos_table_and_store_chips() -> None:

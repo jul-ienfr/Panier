@@ -87,7 +87,7 @@ def render_dashboard_html(payload: dict[str, Any]) -> str:
         + _promos_card(payload.get("promos_since"), promos)
         + _cache_card(cache_by_store)
         + "</main>"
-        "<footer>Dernier run panier : "
+        "<footer>Interface v2 · Dernier run panier : "
         + html.escape(str(payload.get("latest_cart_run") or "—"))
         + "</footer></body></html>"
     )
