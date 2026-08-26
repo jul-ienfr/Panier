@@ -144,9 +144,22 @@ def test_unknown_subcommand_fails_fast() -> None:
         shim.main(["teleport", "--profile", "courses", "--site", "leclerc"])
 
 
-def test_default_command_targets_the_shim() -> None:
+def test_default_transport_is_sdk() -> None:
+    """Plan P4.19 : le défaut est le SDK in-process, plus le shim subprocess."""
     from panier.managed_browser import ManagedBrowserClient
 
     client = ManagedBrowserClient(runner=lambda args, *, input_text=None: None)  # type: ignore[arg-type,return-value]
 
-    assert "panier.managed_browser_shim" in client.command
+    assert client.command is None
+    assert client._sdk is not None
+
+
+def test_env_command_still_targets_the_shim(monkeypatch) -> None:
+    """Échappatoire explicite conservée : PANIER_MANAGED_BROWSER_COMMAND."""
+    from panier.managed_browser import ManagedBrowserClient
+
+    monkeypatch.setenv("PANIER_MANAGED_BROWSER_COMMAND", "panier-managed-browser")
+    client = ManagedBrowserClient(runner=lambda args, *, input_text=None: None)  # type: ignore[arg-type,return-value]
+
+    assert client.command == "panier-managed-browser"
+    assert client._sdk is None
