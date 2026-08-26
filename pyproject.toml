@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 panier = "panier.cli:app"
+panier-managed-browser = "panier.managed_browser_shim:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/panier"]

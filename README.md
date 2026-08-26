@@ -91,14 +91,18 @@ panier drive pick examples/shopping-list.yaml examples/prices.yaml
 panier drive open examples/shopping-list.yaml --drive leclerc --profile panier
 ```
 
-Par défaut, Panier appelle le wrapper local :
+Par défaut, Panier passe par le shim `panier-managed-browser` qui traduit le contrat CLI historique vers le **daemon Managed Browser v2** (HTTP, `http://127.0.0.1:9377` par défaut) :
 
 ```bash
-node /home/jul/tools/camofox-browser/scripts/managed-browser.js ... --json
+python -m panier.managed_browser_shim navigate --url ... --profile courses --site leclerc --json
 ```
 
-La commande peut être surchargée avec `PANIER_MANAGED_BROWSER_COMMAND` ou `--browser-command`.
-`drive pick` choisit ensuite le meilleur produit parmi des offres collectées : correspondance du type demandé d’abord, puis prix.
+- Base URL surchargeable : `PANIER_MANAGED_BROWSER_URL` (ex. `http://127.0.0.1:9388` pour un daemon secondaire).
+- Commande entièrement surchargeable : `PANIER_MANAGED_BROWSER_COMMAND` ou `--browser-command`.
+- Chaque drive exige son profil déclaré côté daemon (`courses`, `courses-auchan`, `courses-carrefour`, …), sinon erreur HTTP 500/404 de policy.
+- `drive pick` choisit ensuite le meilleur produit parmi des offres collectées : correspondance du type demandé d’abord, puis prix.
+
+État de la validation live (daemon v2) : shim et chaîne navigate/console-eval validés sur le daemon réel ; Leclerc a migré de domaine (recherche à re-qualifier) ; Auchan répond sans anti-bot mais exige la sélection du magasin sur un profil neuf (sinon toutes les cartes sont `outOfStock`).
 
 ### Recettes comme source primaire
 

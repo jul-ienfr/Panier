@@ -4,6 +4,8 @@ import json
 import os
 import shlex
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -55,11 +57,18 @@ class TimeoutRunner:
         )
 
 
-class ManagedBrowserClient:
-    """Client fin autour du wrapper Managed Browser local.
+def _default_command() -> str:
+    """Shim v2 lancé par l'interpréteur courant (robuste sans PATH venv)."""
+    return f"{sys.executable} -m panier.managed_browser_shim"
 
-    Le contrat public reste la CLI Node `scripts/managed-browser.js` : Panier ne connaît
-    pas les routes HTTP internes du daemon et reste testable avec un runner injecté.
+
+class ManagedBrowserClient:
+    """Client fin autour du Managed Browser local.
+
+    Le contrat public est la CLI historique ; par défaut elle est traduite vers
+    le daemon v2 par le console-script `panier-managed-browser` (HTTP, voir
+    `panier.managed_browser_shim`). Surcharge possible via
+    PANIER_MANAGED_BROWSER_COMMAND ; Panier reste testable avec un runner injecté.
     """
 
     def __init__(
@@ -72,7 +81,7 @@ class ManagedBrowserClient:
     ) -> None:
         self.command = command or os.environ.get(
             "PANIER_MANAGED_BROWSER_COMMAND",
-            "node /home/jul/tools/camofox-browser/scripts/managed-browser.js",
+            _default_command(),
         )
         self.profile = profile
         self.site = site
@@ -102,7 +111,16 @@ class ManagedBrowserClient:
         args = ["console", "eval", "--expression", expression]
         if tab_id:
             args.extend(["--tab-id", tab_id])
-        return self._run(args)
+        try:
+            return self._run(args)
+        except ManagedBrowserError as exc:
+            # Les pages à redirection client-side (recherche Leclerc/Auchan)
+            # détruisent le contexte d'exécution pendant l'eval : on laisse
+            # la navigation se poser puis on retente une fois.
+            if "Execution context was destroyed" not in str(exc):
+                raise
+            time.sleep(2.0)
+            return self._run(args)
 
     def snapshot(self) -> BrowserCommandResult:
         return self._run(["snapshot"])
