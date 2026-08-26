@@ -3553,12 +3553,16 @@ def cart_status(
     ] = False,
     output_format: OutputFormat = "text",
 ) -> None:
+    is_json = normalize_output_format(output_format) == "json"
     try:
         run = load_cart_run(data_dir, run_id)
     except FileNotFoundError as exc:
+        if is_json:
+            echo_json({"error": str(exc), "run_id": run_id, "has_run": False})
+            raise typer.Exit(code=0)
         raise typer.BadParameter(str(exc)) from exc
     summary = _cart_run_results_summary(run)
-    if normalize_output_format(output_format) == "json" and not browser:
+    if is_json and not browser:
         echo_json(
             {
                 "id": run.id,
