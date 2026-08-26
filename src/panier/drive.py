@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import quote_plus, urljoin
 
 from panier.catalog import DEFAULT_SYNONYMS, ProductCatalog, ResolutionStatus, resolve_item
-from panier.managed_browser import BrowserCommandResult, ManagedBrowserClient
+from panier.managed_browser import (
+    BrowserCommandResult,
+    ManagedBrowserClient,
+    ManagedBrowserError,
+)
 from panier.models import ShoppingItem, StoreOffer, normalize_name
 
 
@@ -83,18 +88,32 @@ _STOPWORDS = {
 
 _SYNONYMS: dict[str, tuple[str, ...]] = DEFAULT_SYNONYMS.copy()
 
-_LECLERC_VIUZ_BASE_URL = "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz"
+# Drive Leclerc par défaut (magasin Ville-la-Grand / Annemasse). Le magasin
+# historique Viuz-en-Sallaz (027419) a fermé ; surcharger via
+# PANIER_LECLERC_STORE_URL pour changer de drive sans commit.
+DEFAULT_LECLERC_STORE_URL = (
+    "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-"
+)
+LECLERC_STORE_URL_ENV_VAR = "PANIER_LECLERC_STORE_URL"
+
+
+def leclerc_store_base_url(environ: dict[str, str] | None = None) -> str:
+    values = os.environ if environ is None else environ
+    raw = values.get(LECLERC_STORE_URL_ENV_VAR, "").strip()
+    url = raw or DEFAULT_LECLERC_STORE_URL
+    return url.rstrip("/")
+
 
 _DRIVE_SEARCH_URLS = {
     "auchan": "https://www.auchan.fr/recherche?text={query}",
-    "leclerc": f"{_LECLERC_VIUZ_BASE_URL}/recherche.aspx?TexteRecherche={{query}}&tri=1",
+    "leclerc": "/recherche.aspx?TexteRecherche={query}&tri=1",
     "carrefour": "https://www.carrefour.fr/s?q={query}",
     "intermarche": "https://www.intermarche.com/recherche/{query}",
 }
 
 _DRIVE_BASE_URLS = {
     "auchan": "https://www.auchan.fr",
-    "leclerc": _LECLERC_VIUZ_BASE_URL,
+    "leclerc": DEFAULT_LECLERC_STORE_URL,
     "carrefour": "https://www.carrefour.fr",
     "intermarche": "https://www.intermarche.com",
 }
@@ -250,9 +269,12 @@ def _resolution_confidence(status: ResolutionStatus) -> str:
 
 def drive_search_url(drive_name: str, query: str, *, tri: int | None = None) -> str:
     normalized_drive = normalize_name(drive_name)
-    template = _DRIVE_SEARCH_URLS.get(normalized_drive)
     encoded = quote_plus(query)
-    if template is None:
+    if normalized_drive == "leclerc":
+        template = leclerc_store_base_url() + _DRIVE_SEARCH_URLS["leclerc"]
+    else:
+        template = _DRIVE_SEARCH_URLS.get(normalized_drive, "")
+    if not template:
         return f"https://www.google.com/search?q={quote_plus(f'{drive_name} drive {query}')}"
     url = template.format(query=encoded)
     if normalized_drive == "leclerc" and tri is not None:
@@ -275,6 +297,32 @@ def open_drive_searches(
     return results
 
 
+def _extract_items_with_retry(
+    browser: ManagedBrowserClient, url: str, tab_id: str | None
+) -> list[dict[str, object]]:
+    """Extraction avec replis : DataDome peut servir une page vide au premier
+    hit, et les catalogues hydratent tard. Un résultat VIDE n'est pas une
+    erreur pour page.evaluate : on relit, puis on re-navigue une fois."""
+    import time
+
+    items: list[dict[str, object]] = []
+    for attempt in range(3):
+        if attempt == 1:
+            time.sleep(3.0)
+        if attempt == 2:
+            try:
+                browser.navigate(url)
+                time.sleep(3.0)
+            except ManagedBrowserError:
+                pass
+        payload = _browser_value(browser.console_eval(_PRODUCT_EXTRACTION_JS, tab_id=tab_id).data)
+        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        items = [raw for raw in raw_items if isinstance(raw, dict)]
+        if items:
+            break
+    return items
+
+
 def collect_drive_offers(
     items: list[ShoppingItem],
     drive_name: str,
@@ -295,12 +343,9 @@ def collect_drive_offers(
         browser_result = browser.navigate(url)
         search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
         tab_id = _browser_tab_id(browser_result.data)
-        payload = _browser_value(browser.console_eval(_PRODUCT_EXTRACTION_JS, tab_id=tab_id).data)
-        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        raw_items = _extract_items_with_retry(browser, url, tab_id)
         item_offers: list[StoreOffer] = []
         for raw in raw_items:
-            if not isinstance(raw, dict):
-                continue
             offer = _offer_from_browser_item(search.entry.item, drive_name, raw)
             if offer is not None:
                 item_offers.append(offer)
@@ -513,6 +558,8 @@ def _absolute_product_url(drive_name: str, value: object) -> str | None:
         return None
     if url.startswith(("http://", "https://")):
         return url
+    if normalize_name(drive_name) == "leclerc":
+        return urljoin(leclerc_store_base_url(), url)
     base_url = _DRIVE_BASE_URLS.get(normalize_name(drive_name))
     return urljoin(base_url, url) if base_url else url
 

@@ -1151,7 +1151,7 @@ def test_best_offer_for_item_prefers_relevance_then_unit_price() -> None:
 
 def test_drive_search_url_encodes_leclerc_query() -> None:
     assert drive_search_url("leclerc", "tomates concassées") == (
-        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
         "recherche.aspx?TexteRecherche=tomates+concass%C3%A9es&tri=1"
     )
 
@@ -1337,11 +1337,11 @@ def test_open_drive_searches_uses_managed_browser_client() -> None:
     assert [result.browser_result.data["tabId"] for result in results] == [1, 2]
     assert calls[0][:3] == ["managed-browser", "navigate", "--url"]
     assert calls[0][3] == (
-        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
         "recherche.aspx?TexteRecherche=riz&tri=1"
     )
     assert calls[1][3] == (
-        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
         "recherche.aspx?TexteRecherche=tomates&tri=1"
     )
 
@@ -2002,7 +2002,7 @@ def test_cart_lines_group_recommendation_by_store() -> None:
     ]
     assert (
         cart_items_param(grouped["leclerc"]) == "riz|Riz 1kg|1|https://l/riz|"
-        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
         "recherche.aspx?TexteRecherche=Riz+1kg&tri=1|offer_collected"
     )
 
@@ -2055,14 +2055,14 @@ def test_cart_lines_use_live_leclerc_drive_search_url_even_when_offer_url_is_blo
                 item="riz",
                 product="Riz long Comptoir du Grain",
                 price=1.67,
-                url="https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/recherche.aspx?TexteRecherche=riz&tri=1#",
+                url="https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/recherche.aspx?TexteRecherche=riz&tri=1#",
             )
         }
     )["leclerc"]
 
     assert lines[0].url.endswith("TexteRecherche=riz&tri=1#")
     assert lines[0].search_url == (
-        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
         "recherche.aspx?TexteRecherche=Riz+long+Comptoir+du+Grain&tri=1"
     )
 
@@ -2464,7 +2464,7 @@ offers:
                     quantity=1,
                     url=None,
                     search_url=(
-                        "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz/"
+                        "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-la-grand-annemasse-/"
                         "recherche.aspx?TexteRecherche=Riz+Leclerc&tri=1"
                     ),
                 )

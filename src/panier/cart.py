@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import yaml
 
+from panier.drive import DEFAULT_LECLERC_STORE_URL, leclerc_store_base_url
 from panier.models import StoreOffer, normalize_name
 
 
@@ -61,14 +62,14 @@ class CartRun:
         }
 
 
-LECLERC_DRIVE_BASE_URL = "https://fd2-courses.leclercdrive.fr/magasin-027419-027419-Viuz-en-Sallaz"
+LECLERC_DRIVE_BASE_URL = DEFAULT_LECLERC_STORE_URL
 
 
 def store_search_url(store: str, query: str) -> str:
     normalized = normalize_name(store)
     encoded = quote_plus(query)
     if normalized == "leclerc":
-        return f"{LECLERC_DRIVE_BASE_URL}/recherche.aspx?TexteRecherche={encoded}&tri=1"
+        return f"{leclerc_store_base_url()}/recherche.aspx?TexteRecherche={encoded}&tri=1"
     if normalized == "auchan":
         return f"https://www.auchan.fr/recherche?text={encoded}"
     if normalized == "carrefour":
@@ -79,7 +80,7 @@ def store_search_url(store: str, query: str) -> str:
 def store_cart_url(store: str) -> str:
     normalized = normalize_name(store)
     if normalized == "leclerc":
-        return f"{LECLERC_DRIVE_BASE_URL}/mon-panier.aspx"
+        return f"{leclerc_store_base_url()}/mon-panier.aspx"
     if normalized == "auchan":
         return "https://www.auchan.fr/panier"
     if normalized == "carrefour":

@@ -232,3 +232,16 @@ def yaml_dump(data: dict) -> str:
     import yaml as _yaml
 
     return _yaml.safe_dump(data, allow_unicode=True)
+
+
+def test_leclerc_store_url_env_override(monkeypatch) -> None:
+    from panier.drive import drive_search_url, leclerc_store_base_url
+
+    monkeypatch.delenv("PANIER_LECLERC_STORE_URL", raising=False)
+    assert "magasin-027411-001261-ville-la-grand-annemasse-" in leclerc_store_base_url()
+
+    monkeypatch.setenv("PANIER_LECLERC_STORE_URL", "https://fd2-courses.leclercdrive.fr/magasin-999999-000000-test")
+    assert leclerc_store_base_url().endswith("test")
+    url = drive_search_url("leclerc", "riz", tri=4)
+    assert "magasin-999999-000000-test/recherche.aspx" in url
+    assert "tri=4" in url
