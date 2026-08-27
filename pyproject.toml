@@ -44,6 +44,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/panier/cart.py" = ["E501"]
+"src/panier/cli.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

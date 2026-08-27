@@ -3559,7 +3559,7 @@ def cart_status(
     except FileNotFoundError as exc:
         if is_json:
             echo_json({"error": str(exc), "run_id": run_id, "has_run": False})
-            raise typer.Exit(code=0)
+            raise typer.Exit(code=0) from exc
         raise typer.BadParameter(str(exc)) from exc
     summary = _cart_run_results_summary(run)
     if is_json and not browser:
