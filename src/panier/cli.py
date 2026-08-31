@@ -141,7 +141,7 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
-OutputFormat = Annotated[str, typer.Option("--format", help="Format de sortie: text ou json")]
+OutputFormat = Annotated[str, typer.Option("--format", "--compact-json", help="Format de sortie: text ou json")]
 profile_app = typer.Typer(help="Gérer le profil alimentaire.")
 recipe_app = typer.Typer(help="Gérer et suggérer des recettes.")
 pantry_app = typer.Typer(help="Gérer le stock local.")
@@ -3160,7 +3160,7 @@ def recipe_shopping(
             comparison = normalize_compare_by(compare_by)
             try:
                 rec = recommend_basket(items, load_offers(prices), mode=mode, max_stores=max_stores, compare_by=comparison, brand_preferences=load_brand_preferences(data_dir))
-                payload["recommendation"] = {"stores": rec.stores, "total": rec.total, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None} for bi in rec.by_item]}
+                payload["recommendation"] = {"stores": rec.stores, "total": rec.total, "by_item": [{"item": _item, "product": _offer.product, "store": _offer.store, "price": _offer.price} for _item, _offer in rec.by_item.items()]}
             except Exception:
                 pass
         echo_json(payload)
@@ -3459,7 +3459,7 @@ def plan(
             "recipes": [{"name": r.name} for r in selected],
             "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
             "offers": [o.model_dump(mode="json") for o in offers],
-            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None, "unit_price": bi.offer.unit_price if bi.offer else None} for bi in recommendation.by_item]},
+            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "by_item": [{"item": _item, "product": _offer.product, "store": _offer.store, "price": _offer.price, "unit_price": _offer.unit_price} for _item, _offer in recommendation.by_item.items()]},
         })
         return
     echo_basket_options(
@@ -3733,7 +3733,7 @@ def week(
     max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
     mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
     max_stores: Annotated[int, typer.Option("--max-stores", min=1)] = 2,
-    compare_by: Annotated[str, typer.Option("--compare-by")] = "unit-price",
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
     use_pantry: Annotated[bool, typer.Option("--use-pantry/--no-pantry")] = True,
     include_tags: Annotated[str | None, typer.Option("--include-tags")] = None,
     exclude_tags: Annotated[str | None, typer.Option("--exclude-tags")] = None,
@@ -3987,7 +3987,7 @@ def week(
         typer.echo(f"Recommandation indisponible: {exc}", err=True)
         raise typer.Exit(1) from exc
     if _json_week:
-        rec = {"mode": recommendation.mode, "stores": recommendation.stores, "total": float(recommendation.total), "reason": recommendation.reason, "savings_vs_best_single": float(recommendation.savings_vs_best_single) if recommendation.savings_vs_best_single is not None else None, "by_item": [{"item": it.item.name if hasattr(it.item,"name") else str(it.item), "store": it.store, "price": float(it.price) if it.price is not None else None} for it in recommendation.by_item]}  # type: ignore[attr-defined]
+        rec = {"mode": recommendation.mode, "stores": recommendation.stores, "total": float(recommendation.total), "reason": recommendation.reason, "savings_vs_best_single": float(recommendation.savings_vs_best_single) if recommendation.savings_vs_best_single is not None else None, "by_item": [{"item": _item, "store": _offer.store, "price": float(_offer.price)} for _item, _offer in recommendation.by_item.items()]}  # type: ignore[attr-defined]
         issues = validate_recommendation_constraints(recommendation.total, len(recommendation.by_item), constraints)
         echo_json({"week": _week_assignments, "items": _week_items, "unfilled": _week_unfilled, "costs": _week_costs, "offers": [o.model_dump(mode="json") for o in offers], "recommendation": rec, "constraint_issues": issues})
         return
@@ -4051,7 +4051,7 @@ def compare(
         echo_json({
             "items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
             "offers": [o.model_dump(mode="json") for o in offers],
-            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "reason": recommendation.reason, "savings_vs_best_single": recommendation.savings_vs_best_single, "by_item": [{"item": bi.item.name, "product": bi.offer.product if bi.offer else None, "store": bi.offer.store if bi.offer else None, "price": bi.offer.price if bi.offer else None, "unit_price": bi.offer.unit_price if bi.offer else None} for bi in recommendation.by_item]},
+            "recommendation": {"stores": recommendation.stores, "mode": recommendation.mode, "total": recommendation.total, "reason": recommendation.reason, "savings_vs_best_single": recommendation.savings_vs_best_single, "by_item": [{"item": _item, "product": _offer.product, "store": _offer.store, "price": _offer.price, "unit_price": _offer.unit_price} for _item, _offer in recommendation.by_item.items()]},
             "constraint_issues": issues,
         })
         return
