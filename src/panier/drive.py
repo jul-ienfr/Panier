@@ -423,7 +423,7 @@ def _strict_sorted_offers(
     ]
     if not eligible:
         eligible = hard_allowed
-    return sorted(
+    ranked = sorted(
         eligible,
         key=lambda offer_score: (
             _offer_compare_value(offer_score.offer, compare_by),
@@ -432,6 +432,56 @@ def _strict_sorted_offers(
             offer_score.offer.product,
         ),
     )
+    return _maybe_jev_reorder(item, ranked)
+
+
+def _maybe_jev_reorder(item: ShoppingItem, ranked: list[OfferScore]) -> list[OfferScore]:
+    """Second avis JEV consultatif sur le top-2 proche (fail-open, jamais d'écriture).
+
+    OFF (``PANIER_JEV_CALIB != 1`` ou ``PANIER_NO_LLM`` actif) → ``ranked``
+    inchangé (byte-identical). ON : un seul appel, uniquement si le top-2
+    est proche (prix à 10 % près ET écart de score ≤ 0.15) ; swap du top-2
+    uniquement si confiance JEV ≥ 0.7. Toute erreur → baseline. Ne lève
+    jamais.
+    """
+    if len(ranked) < 2:
+        return ranked
+    try:
+        from panier import jev_advice
+    except ImportError:
+        return ranked
+    try:
+        if not jev_advice.jev_calib_enabled():
+            return ranked
+        head, second = ranked[0], ranked[1]
+        cheaper = min(float(head.offer.price), float(second.offer.price))
+        dearer = max(float(head.offer.price), float(second.offer.price))
+        price_close = cheaper > 0 and (dearer - cheaper) / cheaper <= 0.10
+        score_close = abs(head.score - second.score) <= 0.15
+        if not (price_close and score_close):
+            return ranked
+        summaries = [
+            {"product": s.offer.product, "price": float(s.offer.price),
+             "unit_price": s.offer.unit_price, "score": round(s.score, 3),
+             "reason": s.reason}
+            for s in ranked[:4]
+        ]
+        out = jev_advice.advise_best_offer(item.name, summaries)
+        picked = out.get("picked_index")
+        if out.get("status") != "ok" or not isinstance(picked, int):
+            return ranked
+        if picked == 0 or not (0 <= picked < len(ranked)):
+            return ranked
+        new_head = ranked[picked]
+        rest = [s for i, s in enumerate(ranked) if i != picked]
+        enriched = OfferScore(
+            offer=new_head.offer,
+            score=new_head.score,
+            reason=f"{new_head.reason} [jev:pick]",
+        )
+        return [enriched] + rest
+    except Exception:
+        return ranked
 
 
 def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -> bool:

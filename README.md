@@ -341,6 +341,10 @@ Le flux normal doit rester explicable et rejouable. Une escalade non déterminis
 
 Cette approche facilite les tests snapshot/régression, évite les appels externes surprises et garde les recommandations justifiables.
 
+### Second avis JEV (opt-in, consultatif, jamais décisionnel)
+
+`src/panier/jev_advice.py` interroge l'évaluateur structuré SystemOne (`POST {JEV_BASE_URL}/v1/systemone`, défaut `http://192.168.31.59:4000`, modèle `jev-1.13-free`) au point central `_strict_sorted_offers` (`drive.py`). Gate `PANIER_JEV_CALIB=1` (défaut OFF = byte-identical, aucun appel réseau), avec coupe-circuit `PANIER_NO_LLM` qui prime (NO_LLM actif → désactivé même si opt-in). JEV n'est pas un LLM de chat : réponse `choice` top-2 proche en prix (≤ 10 %) et confiance ≥ 0.7 → swap + motif `[jev:pick]`, sinon baseline prix conservée. Timeout court (10 s), cache 300 s/128, validation locale anti-422, fail-open total. Tests : `tests/test_jev_advice.py` (12 verts).
+
 ## Philosophie
 
 Panier n'est pas juste un comparateur de drives. Le flux cible est :
