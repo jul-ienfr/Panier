@@ -88,6 +88,8 @@ def test_trend_reports_min_mean_median_last_and_promo(tmp_path: Path) -> None:
     assert trend.min_price == 2.0
     assert trend.mean_price == 2.5
     assert trend.median_price == 2.5
+    assert trend.price_basis == "raw"
+    assert trend.median_price_raw == 2.5
     assert trend.last_price == 2.6
     assert trend.is_promo_candidate is False
 
@@ -95,6 +97,66 @@ def test_trend_reports_min_mean_median_last_and_promo(tmp_path: Path) -> None:
         app, ["history", "trend", "emmental râpé", "--data-dir", str(tmp_path)]
     )
     assert "Candidat promo: non" in promo_run.output
+
+
+def test_trend_median_price_per_litre_mdd_scope(tmp_path: Path) -> None:
+    """Règle median_price : mix conditionnements lait.
+
+    Prix bruts [6.0 (6x1L MDD), 0.85 (50cL MDD), 9.5 (6x1L Lactel)] :
+    médiane brute = 6.0, mais prix/L MDD = [1.0, 1.7] → médiane 1.35.
+    Le pack Lactel (non-MDD) est exclu du scope.
+    """
+    from panier.history_store import is_mdd_offer, price_per_litre
+
+    base = datetime.now(UTC) - timedelta(hours=10)
+    offers = [
+        ("Lait demi-ecreme Marque Repere 6x1L", 6.0),
+        ("Lait demi-ecreme Marque Repere 50cL", 0.85),
+        ("Lait demi-ecreme Lactel 6x1L", 9.5),
+    ]
+    for index, (product, price) in enumerate(offers):
+        record_offers(
+            tmp_path,
+            "leclerc",
+            [StoreOffer(store="leclerc", item="lait", product=product, price=price)],
+            collected_at=base + timedelta(hours=index),
+        )
+
+    points = offers_for_item(tmp_path, "lait")
+    assert len(points) == 3
+    assert is_mdd_offer(points[0]) is True
+    assert is_mdd_offer(points[2]) is False
+    assert price_per_litre(points[0]) == 1.0
+    assert price_per_litre(points[1]) == 1.7
+
+    trend = trend_for_item(tmp_path, "lait")
+    assert trend is not None
+    assert trend.price_basis == "per_litre"
+    assert trend.normalized_observations == 2
+    assert trend.median_price_raw == 6.0
+    assert trend.median_price == 1.35
+
+
+def test_trend_median_falls_back_to_raw_without_mdd_volumetric(tmp_path: Path) -> None:
+    """Sans point MDD volumique : repli raw (comportement historique)."""
+    base = datetime.now(UTC) - timedelta(hours=10)
+    offers = [
+        ("Lait demi-ecreme Lactel 1L", 1.35),
+        ("Lait demi-ecreme Lactel 50cL", 0.95),
+    ]
+    for index, (product, price) in enumerate(offers):
+        record_offers(
+            tmp_path,
+            "leclerc",
+            [StoreOffer(store="leclerc", item="lait", product=product, price=price)],
+            collected_at=base + timedelta(hours=index),
+        )
+
+    trend = trend_for_item(tmp_path, "lait")
+    assert trend is not None
+    assert trend.price_basis == "raw"
+    assert trend.normalized_observations == 0
+    assert trend.median_price == 1.15
 
 
 def test_promos_flags_current_price_below_median(tmp_path: Path) -> None:

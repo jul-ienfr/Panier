@@ -41,6 +41,38 @@ _QUANTITY_UNIT_RE = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|cl|ml)\b",
     re.IGNORECASE,
 )
+_MULTIPACK_RE = re.compile(
+    r"(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(kg|g|l|cl|ml)\b",
+    re.IGNORECASE,
+)
+
+# Labels MDD (marques de distributeur) FR détectés en sous-chaîne du titre
+# produit ou du brand normalisés. Scope volontairement restreint aux labels
+# stables des 4 drives supportés + Lidl (bloqué hors repo mais présent en histo).
+MDD_LABELS = frozenset(
+    {
+        "marque repere",
+        "marque repère",
+        "eco+",
+        "nos regions ont du talent",
+        "nos régions ont du talent",
+        "bio village",
+        "simpl",
+        "carrefour classic",
+        "carrefour bio",
+        "reflets de france",
+        "pouce",
+        "auchan bio",
+        "top budget",
+        "paturages",
+        "pâturages",
+        "chabrior",
+        "monique ranou",
+        "paquito",
+        "milbona",
+        "enzo",
+    }
+)
 
 
 def history_db_path(data_dir: Path) -> Path:
@@ -83,6 +115,13 @@ class PriceTrend:
     last_collected_at: str
     delta_pct: float | None
     is_promo_candidate: bool
+    # Règle median_price : base de la médiane ("per_litre" si ≥1 point
+    # volumique normalisable, sinon "raw" = comportement historique).
+    price_basis: str = "raw"
+    # Médiane sur prix bruts (avant normalisation) ; = median_price si raw.
+    median_price_raw: float = 0.0
+    # Nombre de points ayant participé à la médiane normalisée.
+    normalized_observations: int = 0
 
 
 def detect_brand(product_title: str, known_brands: set[str] | frozenset[str]) -> str | None:
@@ -92,9 +131,52 @@ def detect_brand(product_title: str, known_brands: set[str] | frozenset[str]) ->
     return sorted(matches)[0] if matches else None
 
 
+def is_mdd_offer(point: HistoryPoint) -> bool:
+    """Scope MDD : True si le brand ou le titre porte un label MDD connu.
+
+    Non-MDD (marque nationale comme Lactel/Président) = hors scope : exclues
+    de la médiane normalisée pour ne pas polluer la comparaison MDD.
+    """
+    candidates = [normalize_name(point.brand or ""), normalize_name(point.product_title)]
+    return any(label and label in text for label in MDD_LABELS for text in candidates)
+
+
+def price_per_litre(point: HistoryPoint) -> float | None:
+    """Prix normalisé au litre (€/L) pour un point volumique (ml), sinon None.
+
+    Priorité : unit_price collecté (déjà un prix/L sur les drives) si le
+    conditionnement est volumique ; sinon prix brut / volume en litres déduit
+    du titre (parse_quantity_unit → ml). Massiques (g) et inconnus → None.
+    """
+    if point.unit == "ml" and point.quantity:
+        if point.unit_price is not None and point.unit_price > 0:
+            return float(point.unit_price)
+        litres = point.quantity / 1000.0
+        if litres > 0:
+            return float(point.price) / litres
+    return None
+
+
 def parse_quantity_unit(product_title: str) -> tuple[float | None, str | None]:
     """Quantité/unité du conditionnement détectées dans le titre produit."""
-    match = _QUANTITY_UNIT_RE.search(normalize_name(product_title))
+    title = normalize_name(product_title)
+    # Multipack d'abord : "6x1L" = 6000 ml (volume total, pas 1L).
+    multi = _MULTIPACK_RE.search(title)
+    if multi is not None:
+        count = int(multi.group(1))
+        value = float(multi.group(2).replace(",", "."))
+        unit = normalize_name(multi.group(3))
+        if unit == "kg":
+            value *= 1000
+            unit = "g"
+        elif unit == "l":
+            value *= 1000
+            unit = "ml"
+        elif unit == "cl":
+            value *= 10
+            unit = "ml"
+        return count * value, unit
+    match = _QUANTITY_UNIT_RE.search(title)
     if match is None:
         return None, None
     value = float(match.group(1).replace(",", "."))
@@ -222,7 +304,21 @@ def trend_for_item(
     prices = [point.price for point in points]
     last = points[-1]
     mean = sum(prices) / len(prices)
-    median = _median(prices)
+    median_raw = _median(prices)
+    # Règle median_price : médiane sur prix normalisés au litre, scope MDD.
+    # Seuls les points (volumiques → prix/L calculable) ET MDD participent ;
+    # si aucun point ne qualifie → repli "raw" (comportement historique).
+    normalized = [
+        per_litre
+        for point in points
+        if is_mdd_offer(point) and (per_litre := price_per_litre(point)) is not None
+    ]
+    if normalized:
+        median = _median(normalized)
+        price_basis = "per_litre"
+    else:
+        median = median_raw
+        price_basis = "raw"
     delta_pct = ((last.price - mean) / mean * 100) if mean else None
     return PriceTrend(
         canonical_name=last.canonical_name,
@@ -235,6 +331,9 @@ def trend_for_item(
         last_collected_at=last.collected_at,
         delta_pct=delta_pct,
         is_promo_candidate=last.price < median,
+        price_basis=price_basis,
+        median_price_raw=median_raw,
+        normalized_observations=len(normalized),
     )
 
 
