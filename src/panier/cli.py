@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
+from dataclasses import asdict as _dc_asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -476,7 +477,10 @@ def run_cart_flow_for_store(
             action="flow",
             data=_flow_payload_from_line_results(store, lines, [], dry_run=False),
         )
-    browser.checkpoint(f"before-live-cart-{store}")
+    try:
+        browser.checkpoint(f"before-live-cart-{store}")
+    except Exception:
+        pass
     for line in lines:
         target_urls = [url for url in [line.url, line.search_url] if url]
         if not target_urls:
@@ -601,7 +605,10 @@ def run_cart_remove_flow_for_store(
             action="flow",
             data=_remove_payload_from_line_results(store, lines, [], dry_run=False),
         )
-    browser.checkpoint(f"before-live-cart-{store}-remove")
+    try:
+        browser.checkpoint(f"before-live-cart-{store}-remove")
+    except Exception:
+        pass
     for line in lines:
         target_urls = [url for url in [line.url, line.search_url] if url]
         if not target_urls:
@@ -1359,6 +1366,9 @@ def history_trend(
                 "min_price": trend.min_price,
                 "mean_price": round(trend.mean_price, 4),
                 "median_price": round(trend.median_price, 4),
+                "price_basis": trend.price_basis,
+                "median_price_raw": round(trend.median_price_raw, 4),
+                "normalized_observations": trend.normalized_observations,
                 "last_price": trend.last_price,
                 "last_collected_at": trend.last_collected_at,
                 "delta_pct": (
@@ -1372,7 +1382,7 @@ def history_trend(
     typer.echo(f"  Observations: {trend.observations}")
     typer.echo(f"  Min: {trend.min_price:.2f} €")
     typer.echo(f"  Moyenne: {trend.mean_price:.2f} €")
-    typer.echo(f"  Médiane: {trend.median_price:.2f} €")
+    typer.echo(f"  Médiane: {trend.median_price:.2f} € [{trend.price_basis}]")
     typer.echo(f"  Dernier: {trend.last_price:.2f} € ({trend.last_collected_at})")
     if trend.delta_pct is not None:
         typer.echo(f"  Variation dernier vs moyenne: {trend.delta_pct:+.1f} %")
@@ -1947,7 +1957,7 @@ def init_project(
 
 @doctor_app.command("drive")
 def doctor_drive(
-    store: Annotated[str, typer.Argument(help="Drive à diagnostiquer: leclerc ou auchan")],
+    store: Annotated[str, typer.Argument(help="Drive à diagnostiquer: leclerc, auchan, intermarche ou carrefour")],
     profile: Annotated[str, typer.Option("--profile")] = "courses",
     browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
     output_format: OutputFormat = "text",
@@ -2813,9 +2823,11 @@ def drive_pick(
     offers = load_offers(prices)
     comparison = normalize_compare_by(compare_by)
     if normalize_output_format(output_format) == "json":
-        from panier.selection import pick_best_offers
-        best = pick_best_offers(items, offers, compare_by=comparison)
-        echo_json({"picks": [{"item": k, "product": v.product if v else None, "price": v.price if v else None, "store": v.store if v else None} for k, v in best.items()]})
+        picks = []
+        for item in items:
+            chosen = best_offer_for_item(item, offers, compare_by=comparison)
+            picks.append({"item": item.name, "product": chosen.offer.product if chosen else None, "price": chosen.offer.price if chosen else None, "store": chosen.offer.store if chosen else None})
+        echo_json({"picks": picks})
         return
     items, offers, _constraints = prepare_items_and_offers(items, offers, data_dir)
     typer.echo("Meilleurs produits:")
@@ -3633,7 +3645,7 @@ def cart_add(
         results=results,
     )
     if _json_ca:
-        echo_json({"run_id": str(path), "action": "add", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else dict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
+        echo_json({"run_id": str(path), "action": "add", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else _dc_asdict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
         return
     typer.echo(f"Run panier sauvegardé: {path}")
 
@@ -3672,7 +3684,7 @@ def cart_remove(
         results=results,
     )
     if _json_cr:
-        echo_json({"run_id": str(path), "action": "remove", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else dict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
+        echo_json({"run_id": str(path), "action": "remove", "dry_run": cart_dry_run, "results": results, "grouped_lines": {k: [ln.model_dump(mode="json") if hasattr(ln, "model_dump") else _dc_asdict(ln) for ln in v] for k, v in run.grouped_lines.items()}})
         return
     typer.echo(f"Run panier sauvegardé: {path}")
 

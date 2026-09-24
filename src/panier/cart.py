@@ -74,6 +74,8 @@ def store_search_url(store: str, query: str) -> str:
         return f"https://www.auchan.fr/recherche?text={encoded}"
     if normalized == "carrefour":
         return f"https://www.carrefour.fr/s?q={encoded}"
+    if normalized == "intermarche":
+        return f"https://www.intermarche.com/recherche/{encoded}"
     return ""
 
 
@@ -99,7 +101,14 @@ async ({ item, product, quantity, dryRun }) => {
     .trim()
     .toLowerCase();
   const wanted = norm(product || item);
-  const challengeHost = /captcha-delivery|datadome/i.test(document.documentElement?.outerHTML || '');
+  const href = location.href || '';
+  const title = document.title || '';
+  const bodyHead = (document.body?.innerText || '').slice(0, 2000);
+  const htmlHead = (document.documentElement?.outerHTML || '').slice(0, 20000);
+  const challengeHost = /captcha-delivery/i.test(href)
+    || /captcha-delivery\.com/i.test(htmlHead)
+    || /verify you are (a )?human|etes un robot|protection anti-robot/i.test(title + ' ' + bodyHead)
+    || Boolean(document.querySelector('iframe[src*=captcha-delivery], #datadome-captcha, .datadome-captcha, [id*=dd-captcha]'));
   if (challengeHost) {
     return { item, product, url: location.href, catalog_found: false, removable: false, removed: false, blocked_by: 'anti-bot', error: 'Blocage anti-bot détecté' };
   }
@@ -645,7 +654,14 @@ async ({ item, product, quantity, dryRun }) => {
     .trim()
     .toLowerCase();
   const wanted = norm(product || item);
-  const challengeHost = /captcha-delivery|datadome/i.test(document.documentElement?.outerHTML || '');
+  const href = location.href || '';
+  const title = document.title || '';
+  const bodyHead = (document.body?.innerText || '').slice(0, 2000);
+  const htmlHead = (document.documentElement?.outerHTML || '').slice(0, 20000);
+  const challengeHost = /captcha-delivery/i.test(href)
+    || /captcha-delivery\.com/i.test(htmlHead)
+    || /verify you are (a )?human|etes un robot|protection anti-robot/i.test(title + ' ' + bodyHead)
+    || Boolean(document.querySelector('iframe[src*=captcha-delivery], #datadome-captcha, .datadome-captcha, [id*=dd-captcha]'));
   if (challengeHost) {
     return {
       item,
@@ -664,10 +680,13 @@ async ({ item, product, quantity, dryRun }) => {
   }
   const wantedTokens = wanted.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
   const textOf = (node) => norm(node?.innerText || node?.textContent || '');
-  const nodes = Array.from(document.querySelectorAll(
-    '.liWCRS310_Product, [data-testid*=product], [class*=product], [class*=Product], article, li, [data-testid*=tile], [class*=tile]'
-  ));
-  const scored = nodes
+  try {
+    for (let w = 0; w < 40 && !document.querySelector('.liWCRS310_Product'); w += 1) {
+      await sleep(250);
+    }
+  } catch (e) { /* ignore wait errors */ }
+  const productCards = Array.from(document.querySelectorAll('.liWCRS310_Product'));
+  const scored = productCards
     .map((node) => {
       const text = textOf(node);
       if (!text || !/\d|€|ajouter|panier|bientot|disponible/.test(text)) return null;
@@ -676,8 +695,8 @@ async ({ item, product, quantity, dryRun }) => {
       return { node, text, score: exact ? score + 5 : score };
     })
     .filter(Boolean)
-    .sort((a, b) => b.score - a.score);
-  const card = scored.find((entry) => entry.score > 0)?.node || nodes.find((node) => /ajouter\s+au\s+panier/i.test(node.innerText || node.textContent || '')) || null;
+    .sort((a, b) => (b.score - a.score) || (a.text.length - b.text.length));
+  const card = scored.find((entry) => entry.score > 0)?.node || null;
   const catalogFound = Boolean(card);
   const visibleText = card ? (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim() : '';
   const controls = card ? Array.from(card.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]')) : [];
