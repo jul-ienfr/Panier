@@ -323,6 +323,38 @@ def _extract_items_with_retry(
     return items
 
 
+def _offer_identity(offer: StoreOffer) -> str:
+    """Clé de dédup : URL + produit + prix.
+
+    Le JS d'extraction voit parent+enfant : le doublon réel a même URL ET
+    même titre. La clé composite évite de fusionner des produits distincts
+    quand l'URL est absente ou réduite à la base du magasin ("#").
+    """
+    raw = str(offer.url or "").strip()
+    base = raw.split("#", 1)[0].strip().rstrip("/").lower()
+    if base and base not in ("http:", "https:") and "://" in base:
+        url_key = f"url:{base}"
+    else:
+        url_key = "url:-"
+    return (
+        f"{url_key}|{normalize_name(offer.product)}|"
+        f"{offer.price}|{offer.unit_price}"
+    )
+
+
+def _dedupe_offers(offers: list[StoreOffer]) -> list[StoreOffer]:
+    """Déduplique en préservant l'ordre (JS d'extraction voit parent+enfant)."""
+    seen: set[str] = set()
+    unique: list[StoreOffer] = []
+    for offer in offers:
+        key = _offer_identity(offer)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(offer)
+    return unique
+
+
 def collect_drive_offers(
     items: list[ShoppingItem],
     drive_name: str,
@@ -349,7 +381,7 @@ def collect_drive_offers(
             offer = _offer_from_browser_item(search.entry.item, drive_name, raw)
             if offer is not None:
                 item_offers.append(offer)
-        scored = _strict_sorted_offers(search.entry.item, item_offers)
+        scored = _strict_sorted_offers(search.entry.item, _dedupe_offers(item_offers))
         offers.extend(score.offer for score in scored[:max_results])
     return offers
 
