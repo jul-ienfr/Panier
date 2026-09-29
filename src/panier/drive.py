@@ -97,6 +97,21 @@ DEFAULT_LECLERC_STORE_URL = (
 LECLERC_STORE_URL_ENV_VAR = "PANIER_LECLERC_STORE_URL"
 
 
+# Drive Super U / Courses U par défaut (Roujan, prouvé fonctionnel le
+# 2026-09-29 : recherche /recherche?q= OK sans login, sans challenge).
+# Courses U exige un contexte magasin pour prix/panier ; surcharger via
+# PANIER_SUPERU_STORE_URL pour pointer son propre drive sans commit.
+DEFAULT_SUPERU_STORE_URL = "https://www.coursesu.com/drive-superu-roujan"
+SUPERU_STORE_URL_ENV_VAR = "PANIER_SUPERU_STORE_URL"
+
+
+def superu_store_base_url(environ: dict[str, str] | None = None) -> str:
+    values = os.environ if environ is None else environ
+    raw = values.get(SUPERU_STORE_URL_ENV_VAR, "").strip()
+    url = raw or DEFAULT_SUPERU_STORE_URL
+    return url.rstrip("/")
+
+
 def leclerc_store_base_url(environ: dict[str, str] | None = None) -> str:
     values = os.environ if environ is None else environ
     raw = values.get(LECLERC_STORE_URL_ENV_VAR, "").strip()
@@ -109,6 +124,7 @@ _DRIVE_SEARCH_URLS = {
     "leclerc": "/recherche.aspx?TexteRecherche={query}&tri=1",
     "carrefour": "https://www.carrefour.fr/s?q={query}",
     "intermarche": "https://www.intermarche.com/recherche/{query}",
+    "superu": "https://www.coursesu.com/recherche?q={query}",
 }
 
 _DRIVE_BASE_URLS = {
@@ -116,7 +132,23 @@ _DRIVE_BASE_URLS = {
     "leclerc": DEFAULT_LECLERC_STORE_URL,
     "carrefour": "https://www.carrefour.fr",
     "intermarche": "https://www.intermarche.com",
+    "superu": "https://www.coursesu.com",
 }
+
+# Variantes saisies par l'utilisateur ("super u", "courses u", "coursesu")
+# → clé canonique "superu". normalize_name("super u") == "super u" (espaces
+# conservées), donc la table directe _DRIVE_SEARCH_URLS ne suffit pas.
+_DRIVE_ALIASES = {
+    "super u": "superu",
+    "coursesu": "superu",
+    "courses u": "superu",
+    "u drive": "superu",
+}
+
+
+def canonical_drive_name(drive_name: str) -> str:
+    normalized = normalize_name(drive_name)
+    return _DRIVE_ALIASES.get(normalized, normalized)
 
 _PRODUCT_EXTRACTION_JS = r"""
 (async () => {
@@ -268,7 +300,7 @@ def _resolution_confidence(status: ResolutionStatus) -> str:
 
 
 def drive_search_url(drive_name: str, query: str, *, tri: int | None = None) -> str:
-    normalized_drive = normalize_name(drive_name)
+    normalized_drive = canonical_drive_name(drive_name)
     encoded = quote_plus(query)
     if normalized_drive == "leclerc":
         template = leclerc_store_base_url() + _DRIVE_SEARCH_URLS["leclerc"]
@@ -366,12 +398,20 @@ def collect_drive_offers(
     """Ouvre les recherches drive puis extrait les premières offres visibles."""
     offers: list[StoreOffer] = []
     for entry in build_drive_search_plan(items, drive_name, products, catalog):
-        normalized_drive = normalize_name(drive_name)
+        normalized_drive = canonical_drive_name(drive_name)
         url = drive_search_url(
             drive_name,
             entry.query,
             tri=_leclerc_sort_for_item(entry.item) if normalized_drive == "leclerc" else None,
         )
+        if normalized_drive == "superu":
+            # Courses U exige un contexte magasin : poser le magasin (défaut
+            # Roujan, surchargeable via PANIER_SUPERU_STORE_URL) avant la
+            # recherche globale /recherche?q=.
+            try:
+                browser.navigate(superu_store_base_url())
+            except ManagedBrowserError:
+                pass
         browser_result = browser.navigate(url)
         search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
         tab_id = _browser_tab_id(browser_result.data)
@@ -575,7 +615,7 @@ def _offer_from_browser_item(
     unit_price = _parse_euro_price(raw.get("unitPrice") or raw.get("unit_price"))
     url = _absolute_product_url(drive_name, raw.get("url"))
     candidate = StoreOffer(
-        store=normalize_name(drive_name),
+        store=canonical_drive_name(drive_name),
         item=item.name,
         product=title,
         price=price,
@@ -640,9 +680,10 @@ def _absolute_product_url(drive_name: str, value: object) -> str | None:
         return None
     if url.startswith(("http://", "https://")):
         return url
-    if normalize_name(drive_name) == "leclerc":
+    canonical = canonical_drive_name(drive_name)
+    if canonical == "leclerc":
         return urljoin(leclerc_store_base_url(), url)
-    base_url = _DRIVE_BASE_URLS.get(normalize_name(drive_name))
+    base_url = _DRIVE_BASE_URLS.get(canonical)
     return urljoin(base_url, url) if base_url else url
 
 
