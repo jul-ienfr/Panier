@@ -447,6 +447,52 @@ def _flow_payload_from_line_results(
     }
 
 
+def _maybe_agent_fallback(
+    store: str,
+    line: CartLine,
+    deterministic_result: dict | None,
+    profile: str,
+    browser_command: str | None,
+    *,
+    action: str,
+) -> dict | None:
+    """Bascule JEV si le déterminisme a échoué et que le fallback est actif.
+
+    Retourne la line_result agent, ou None (le flux garde le résultat
+    déterministe). Ne lève jamais : un fallback en échec reste un échec
+    explicite, jamais un crash du run panier.
+    """
+    from panier.agent_fallback import (
+        agent_fallback_enabled,
+        line_result_from_agent,
+        run_cart_agent_fallback,
+    )
+
+    if not agent_fallback_enabled():
+        return None
+    if deterministic_result and (
+        deterministic_result.get("catalog_found")
+        or deterministic_result.get("addable")
+        or deterministic_result.get("inserted")
+        or deterministic_result.get("removable")
+        or deterministic_result.get("removed")
+    ):
+        return None
+    try:
+        agent = run_cart_agent_fallback(
+            store, line, profile=profile, browser_command=browser_command,
+            action=action,
+        )
+    except Exception as exc:
+        return {
+            "item": line.item,
+            "product": line.product,
+            "catalog_found": False,
+            "blocked_by": f"agent:transport ({exc})",
+        }
+    return line_result_from_agent(store, line, agent.data, action=action)
+
+
 def run_cart_flow_for_store(
     store: str,
     lines: list[CartLine],
@@ -532,7 +578,13 @@ def run_cart_flow_for_store(
                 break
             fallback_result = line_result
         else:
-            line_results.append(fallback_result or {"error": "aucun résultat navigateur"})
+            line_results.append(
+                _maybe_agent_fallback(
+                    store, line, fallback_result, profile, browser_command, action="add"
+                )
+                or fallback_result
+                or {"error": "aucun résultat navigateur"}
+            )
     return BrowserCommandResult(
         action="flow",
         data=_flow_payload_from_line_results(store, lines, line_results, dry_run=False),
@@ -640,7 +692,13 @@ def run_cart_remove_flow_for_store(
                 break
             fallback_result = line_result
         else:
-            line_results.append(fallback_result or {"error": "aucun résultat navigateur"})
+            line_results.append(
+                _maybe_agent_fallback(
+                    store, line, fallback_result, profile, browser_command, action="remove"
+                )
+                or fallback_result
+                or {"error": "aucun résultat navigateur"}
+            )
     return BrowserCommandResult(
         action="flow",
         data=_remove_payload_from_line_results(store, lines, line_results, dry_run=False),
@@ -678,9 +736,7 @@ def cart_flow_value(result: BrowserCommandResult) -> dict:
 
 
 def _cart_result_counts(value: dict, action: str) -> dict[str, int]:
-    catalog_found = (
-        value.get("catalog_found") if isinstance(value.get("catalog_found"), list) else []
-    )
+    catalog_found: list = list(value.get("catalog_found")) if isinstance(value.get("catalog_found"), list) else []
     if action == "remove":
         available = value.get("removable") if isinstance(value.get("removable"), list) else []
         done = value.get("removed") if isinstance(value.get("removed"), list) else []
@@ -695,9 +751,7 @@ def echo_cart_flow_result(
 ) -> None:
     value = cart_flow_value(result)
     suffix = "dry-run" if dry_run else "live"
-    catalog_found = (
-        value.get("catalog_found") if isinstance(value.get("catalog_found"), list) else []
-    )
+    catalog_found: list = list(value.get("catalog_found")) if isinstance(value.get("catalog_found"), list) else []
     if action == "remove":
         available = value.get("removable") if isinstance(value.get("removable"), list) else []
         done = value.get("removed") if isinstance(value.get("removed"), list) else []

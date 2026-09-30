@@ -14,6 +14,7 @@ Routes utilisées :
 - `snapshot`                  → POST /managed/cli/snapshot
 - `flow run NAME --param k=v` → POST /flow/run
 - `storage checkpoint ...`    → POST /storage/checkpoint
+- `agent run --goal G ...`    → POST /managed/agent/run (pilote JEV, opt-in)
 
 Base URL : PANIER_MANAGED_BROWSER_URL (défaut http://127.0.0.1:9377).
 Timeout : PANIER_BROWSER_COMMAND_TIMEOUT secondes (défaut 120).
@@ -37,6 +38,7 @@ _SUBCOMMAND_ROUTES = {
     ("snapshot",): "/managed/cli/snapshot",
     ("flow", "run"): "/flow/run",
     ("storage", "checkpoint"): "/storage/checkpoint",
+    ("agent", "run"): "/managed/agent/run",
 }
 
 _VALUE_FLAGS = {
@@ -44,6 +46,9 @@ _VALUE_FLAGS = {
     "--expression": "expression",
     "--tab-id": "tab_id",
     "--reason": "reason",
+    "--goal": "goal",
+    "--max-steps": "max_steps",
+    "--expected": "expected",
     "--max-side-effect-level": "_max_side_effect_level",
     "--param": "_params",
 }
@@ -64,7 +69,7 @@ def parse_args(argv: list[str]) -> tuple[tuple[str, ...], dict[str, object], str
         elif token == "--site":
             index += 1
             site = argv[index]
-        elif token == "--json" or token == "--allow-llm-repair":
+        elif token == "--json" or token == "--allow-llm-repair" or token == "--dry-run":
             options[token] = True
         elif token in _VALUE_FLAGS:
             index += 1
@@ -114,6 +119,20 @@ def build_payload(
             payload["allow_llm_repair"] = True
     elif command == ("storage", "checkpoint"):
         payload["reason"] = options.get("reason", "panier")
+    elif command == ("agent", "run"):
+        payload["goal"] = options.get("goal", "")
+        if options.get("max_steps"):
+            try:
+                payload["max_steps"] = int(str(options["max_steps"]))
+            except (TypeError, ValueError):
+                pass
+        if options.get("--dry-run"):
+            payload["dry_run"] = True
+        if options.get("expected"):
+            try:
+                payload["expected"] = json.loads(str(options["expected"]))
+            except json.JSONDecodeError:
+                pass
     return route, payload
 
 

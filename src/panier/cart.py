@@ -496,10 +496,10 @@ def cart_status_expression(store: str, lines: list[CartLine]) -> str:
 
 
 def cart_sync_diff(store: str, desired: list[CartLine], status: dict) -> dict:
-    matches = (
-        status.get("expected_matches") if isinstance(status.get("expected_matches"), list) else []
-    )
-    actual = status.get("actual_lines") if isinstance(status.get("actual_lines"), list) else []
+    raw_matches = status.get("expected_matches")
+    matches: list = list(raw_matches) if isinstance(raw_matches, list) else []
+    raw_actual = status.get("actual_lines")
+    actual: list = list(raw_actual) if isinstance(raw_actual, list) else []
     used_actual = {
         m.get("actual_index") for m in matches if isinstance(m, dict) and m.get("matched")
     }

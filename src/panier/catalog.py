@@ -71,7 +71,7 @@ class CatalogProduct(BaseModel):
         if isinstance(value, str):
             values = [value]
         else:
-            values = list(value)  # type: ignore[arg-type]
+            values = list(value) if isinstance(value, (list, tuple, set)) else [value]
         return tuple(
             dict.fromkeys(normalize_name(str(item)) for item in values if str(item).strip())
         )

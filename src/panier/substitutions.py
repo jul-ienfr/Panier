@@ -26,7 +26,8 @@ class SubstitutionRule(BaseModel):
             return []
         if isinstance(value, str):
             return [normalize_name(value)]
-        return [normalize_name(str(item)) for item in value if str(item).strip()]
+        items = value if isinstance(value, (list, tuple, set)) else [value]
+        return [normalize_name(str(item)) for item in items if str(item).strip()]
 
 
 class SubstitutionCatalog(BaseModel):

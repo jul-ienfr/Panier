@@ -48,7 +48,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
 python_version = "3.11"
-mypy_path = "src"
+mypy_path = ["src", "/home/jul/projects/Hermes-Managed-Browser/server/sdk/python"]
 explicit_package_bases = true
 no_implicit_optional = true
 warn_unused_ignores = false

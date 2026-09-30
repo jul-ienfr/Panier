@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class ManagedBrowserError(RuntimeError):
@@ -104,7 +104,7 @@ class ManagedBrowserClient:
         explicit_command = command or os.environ.get("PANIER_MANAGED_BROWSER_COMMAND")
         self.command = explicit_command
         self.runner = runner
-        self._sdk = None
+        self._sdk: Any = None
         if explicit_command is None:
             self._sdk = self._build_sdk()
         else:
@@ -160,7 +160,10 @@ class ManagedBrowserClient:
 
     def _open_via_sdk(self, url: str | None) -> dict:
         """cli/open via SDK. 409 = succès (détail porte le tab_id), comme le shim."""
-        from managed_browser_client import TabConflict
+        try:
+            from managed_browser_client import TabConflict
+        except ImportError as exc:
+            raise ManagedBrowserError(f"Managed Browser : SDK absent ({exc})") from exc
 
         try:
             return self._sdk.open(profile=self.profile, url=url)
@@ -235,11 +238,45 @@ class ManagedBrowserClient:
             return BrowserCommandResult(action="storage", data=data)
         return self._run(["storage", "checkpoint", "--reason", reason])
 
+    def agent_run(
+        self,
+        goal: str,
+        *,
+        url: str | None = None,
+        max_steps: int | None = None,
+        dry_run: bool | None = None,
+        expected: dict | None = None,
+        timeout_s: int | None = None,
+    ) -> BrowserCommandResult:
+        """Pilote agentique JEV (fallback, nécessite BROWSER_JEV_AGENT=1 serveur)."""
+        if self.command is None and getattr(self, "_sdk", None) is not None:
+            try:
+                data = self._sdk.agent_run(
+                    self.profile, goal, url=url, site=self.site,
+                    max_steps=max_steps, dry_run=dry_run,
+                    confirm_irreversible=True, expected=expected, timeout_s=timeout_s,
+                )
+            except Exception as exc:
+                raise self._translate(exc) from None
+            return BrowserCommandResult(action="agent", data=data)
+        args = ["agent", "run", "--goal", goal]
+        if url:
+            args.extend(["--url", url])
+        if max_steps is not None:
+            args.extend(["--max-steps", str(max_steps)])
+        if dry_run:
+            args.append("--dry-run")
+        if expected:
+            args.extend(["--expected", json.dumps(expected, ensure_ascii=False)])
+        return self._run(args)
+
     @staticmethod
     def _translate(exc: Exception) -> ManagedBrowserError:
         """Exceptions SDK → ManagedBrowserError opérateur-safe."""
-        from managed_browser_client import BusyRetryable, RateLimited
-
+        try:
+            from managed_browser_client import BusyRetryable, RateLimited
+        except ImportError:
+            return ManagedBrowserError(f"Managed Browser : {exc}")
         if isinstance(exc, RateLimited):
             return ManagedBrowserError(
                 "Managed Browser : plafond du consommateur atteint (429, non-retryable)."

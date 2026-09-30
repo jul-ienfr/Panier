@@ -435,7 +435,7 @@ def recommend_basket(
             reason="Panier simple sur un seul drive.",
         )
 
-    store_sets = []
+    store_sets: list[tuple[str, ...]] = []
     for count in range(1, min(max_stores, len(stores)) + 1):
         store_sets.extend(combinations(stores, count))
 

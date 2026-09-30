@@ -150,6 +150,24 @@ def canonical_drive_name(drive_name: str) -> str:
     normalized = normalize_name(drive_name)
     return _DRIVE_ALIASES.get(normalized, normalized)
 
+
+def drive_store_url_for_profile(profile: str | None, drive_name: str) -> str | None:
+    """URL magasin imposée par le profil navigateur (centralisation profil→magasin).
+
+    - profile == "courses-superu" ou drive canonique "superu" →
+      superu_store_base_url() (défaut Roujan, surchargeable via
+      PANIER_SUPERU_STORE_URL) ;
+    - drive canonique "leclerc" → leclerc_store_base_url() ;
+    - sinon None (aucun contexte magasin requis).
+    """
+    if (profile or "").strip().lower() == "courses-superu" or canonical_drive_name(
+        drive_name
+    ) == "superu":
+        return superu_store_base_url()
+    if canonical_drive_name(drive_name) == "leclerc":
+        return leclerc_store_base_url()
+    return None
+
 _PRODUCT_EXTRACTION_JS = r"""
 (async () => {
   /* Les catalogues hydratent leurs prix après le rendu initial : scroll de
@@ -405,13 +423,17 @@ def collect_drive_offers(
             tri=_leclerc_sort_for_item(entry.item) if normalized_drive == "leclerc" else None,
         )
         if normalized_drive == "superu":
-            # Courses U exige un contexte magasin : poser le magasin (défaut
-            # Roujan, surchargeable via PANIER_SUPERU_STORE_URL) avant la
-            # recherche globale /recherche?q=.
-            try:
-                browser.navigate(superu_store_base_url())
-            except ManagedBrowserError:
-                pass
+            # Courses U exige un contexte magasin : poser le magasin imposé par
+            # le profil (défaut Roujan, surchargeable via
+            # PANIER_SUPERU_STORE_URL) avant la recherche globale /recherche?q=.
+            store_url = drive_store_url_for_profile(
+                getattr(browser, "profile", None), drive_name
+            )
+            if store_url:
+                try:
+                    browser.navigate(store_url)
+                except ManagedBrowserError:
+                    pass
         browser_result = browser.navigate(url)
         search = BrowserSearchResult(entry=entry, url=url, browser_result=browser_result)
         tab_id = _browser_tab_id(browser_result.data)
