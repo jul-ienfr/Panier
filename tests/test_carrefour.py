@@ -31,6 +31,14 @@ def test_carrefour_search_and_cart_urls() -> None:
     assert store_cart_url("carrefour") == "https://www.carrefour.fr/cart"
 
 
+def test_superu_search_and_cart_urls() -> None:
+    assert (
+        store_search_url("superu", "emmental rape")
+        == "https://www.coursesu.com/recherche?q=emmental+rape"
+    )
+    assert store_cart_url("superu") == "https://www.coursesu.com/panier"
+
+
 def test_drive_plan_accepts_carrefour(tmp_path: Path) -> None:
     shopping = tmp_path / "list.yaml"
     shopping.write_text(

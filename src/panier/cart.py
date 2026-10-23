@@ -76,6 +76,8 @@ def store_search_url(store: str, query: str) -> str:
         return f"https://www.carrefour.fr/s?q={encoded}"
     if normalized == "intermarche":
         return f"https://www.intermarche.com/recherche/{encoded}"
+    if normalized == "superu":
+        return f"https://www.coursesu.com/recherche?q={encoded}"
     return ""
 
 
@@ -87,6 +89,8 @@ def store_cart_url(store: str) -> str:
         return "https://www.auchan.fr/panier"
     if normalized == "carrefour":
         return "https://www.carrefour.fr/cart"
+    if normalized == "superu":
+        return "https://www.coursesu.com/panier"
     return ""
 
 
