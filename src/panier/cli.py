@@ -2286,23 +2286,39 @@ def profile_set(
     _echo_household_meta(updated)
 
 
+def _resolve_show_household(data_dir: Path, name: str | None) -> HouseholdProfile | None:
+    """`--household <name>` : foyer nommé, exit !=0 si absent ; défaut = foyer actif."""
+    if name is None:
+        return load_active_household(data_dir)
+    try:
+        return load_household(data_dir, name)
+    except HouseholdError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 @profile_app.command("show")
 def profile_show(
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     output_format: OutputFormat = "text",
+    household: Annotated[
+        str | None,
+        typer.Option(
+            "--household",
+            help="Foyer nommé à afficher (défaut : foyer actif ; échec si absent).",
+        ),
+    ] = None,
 ) -> None:
+    target = _resolve_show_household(data_dir, household)
+    profile = target.preferences if target is not None else load_profile(data_dir)
     if normalize_output_format(output_format) == "json":
-        household = load_active_household(data_dir)
-        profile = load_profile(data_dir)
-        echo_json({"household": household.model_dump(mode="json") if household else None, "profile": profile.model_dump(mode="json")})
+        echo_json({"household": target.model_dump(mode="json") if target else None, "profile": profile.model_dump(mode="json")})
         return
-    household = load_active_household(data_dir)
-    if household is not None:
-        _echo_household_meta(household)
+    if target is not None:
+        _echo_household_meta(target)
         typer.echo("Préférences:")
     typer.echo(
         yaml.safe_dump(
-            load_profile(data_dir).model_dump(mode="json"),
+            profile.model_dump(mode="json"),
             allow_unicode=True,
             sort_keys=True,
         )
