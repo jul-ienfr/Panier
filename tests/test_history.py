@@ -99,6 +99,26 @@ def test_trend_reports_min_mean_median_last_and_promo(tmp_path: Path) -> None:
     assert "Candidat promo: non" in promo_run.output
 
 
+def test_trend_json_vide_reste_du_json(tmp_path: Path) -> None:
+    """Verrou : --format json doit sortir du JSON même sans historique (jamais du texte)."""
+    result = RUNNER.invoke(
+        app,
+        [
+            "history",
+            "trend",
+            "emmental râpé",
+            "--data-dir",
+            str(tmp_path / "vide"),
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    parsed = yaml.safe_load(result.output)
+    assert parsed == {"canonical_name": "emmental râpé", "observations": 0}
+
+
 def test_trend_median_price_per_litre_mdd_scope(tmp_path: Path) -> None:
     """Règle median_price : mix conditionnements lait.
 

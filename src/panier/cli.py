@@ -1409,6 +1409,9 @@ def history_trend(
     cutoff = _history_since(since)
     trend = trend_for_item(data_dir, ingredient, store=store, since=cutoff)
     if trend is None:
+        if normalize_output_format(output_format) == "json":
+            echo_json({"canonical_name": normalize_name(ingredient), "observations": 0})
+            return
         typer.echo(f"Aucun historique pour {normalize_name(ingredient)}")
         return
     if normalize_output_format(output_format) == "json":
