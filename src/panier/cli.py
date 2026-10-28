@@ -213,6 +213,33 @@ def load_household_preferences(data_dir: Path) -> HouseholdProfile | None:
     return load_active_household(data_dir)
 
 
+def split_thresholds(
+    data_dir: Path,
+    *,
+    min_eur: float | None = None,
+    min_percent: float | None = None,
+) -> dict[str, float]:
+    """Seuils de décision du panier éclaté.
+
+    Priorité : option CLI > foyer actif > défaut du planner (8 € / 10 %).
+    Seul un seuil explicitement fourni est renvoyé, afin que le planner garde
+    ses valeurs par défaut quand rien n'est configuré.
+    """
+    household = load_active_household(data_dir)
+    resolved: dict[str, float] = {}
+    eur = min_eur if min_eur is not None else (
+        household.split_min_savings_eur if household is not None else None
+    )
+    percent = min_percent if min_percent is not None else (
+        household.split_min_savings_percent if household is not None else None
+    )
+    if eur is not None:
+        resolved["split_min_savings_eur"] = float(eur)
+    if percent is not None:
+        resolved["split_min_savings_percent"] = float(percent)
+    return resolved
+
+
 def load_recipes(data_dir: Path) -> list[Recipe]:
     path = recipes_path(data_dir)
     if not path.exists():
@@ -2091,6 +2118,21 @@ def _echo_household_meta(household: HouseholdProfile) -> None:
         typer.echo(f"  Portions par repas: {household.servings_per_meal}")
     if household.budget_max_eur is not None:
         typer.echo(f"  Budget max: {household.budget_max_eur:.2f} €")
+    if (
+        household.split_min_savings_eur is not None
+        or household.split_min_savings_percent is not None
+    ):
+        eur = (
+            f"{household.split_min_savings_eur:.2f} €"
+            if household.split_min_savings_eur is not None
+            else "défaut"
+        )
+        pct = (
+            f"{household.split_min_savings_percent:.1f} %"
+            if household.split_min_savings_percent is not None
+            else "défaut"
+        )
+        typer.echo(f"  Seuil panier éclaté: {eur} et {pct}")
     if household.notes:
         typer.echo(f"  Notes: {household.notes}")
 
@@ -2104,6 +2146,23 @@ def profile_create(
     disable_store: Annotated[list[str] | None, typer.Option("--disable-store")] = None,
     servings_per_meal: Annotated[int | None, typer.Option("--servings", min=1)] = None,
     budget_max_eur: Annotated[float | None, typer.Option("--budget-max-eur", min=0.01)] = None,
+    split_min_savings_eur: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-eur",
+            min=0,
+            help="Économie minimale (€) pour accepter un panier éclaté.",
+        ),
+    ] = None,
+    split_min_savings_percent: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-percent",
+            min=0,
+            max=100,
+            help="Économie minimale (%) pour accepter un panier éclaté.",
+        ),
+    ] = None,
     notes: Annotated[str | None, typer.Option("--notes")] = None,
     from_base: Annotated[
         bool,
@@ -2131,6 +2190,8 @@ def profile_create(
         stores=stores,
         servings_per_meal=servings_per_meal,
         budget_max_eur=budget_max_eur,
+        split_min_savings_eur=split_min_savings_eur,
+        split_min_savings_percent=split_min_savings_percent,
         notes=notes,
         preferences=preferences,
     )
@@ -2241,9 +2302,30 @@ def profile_set(
     disable_store: Annotated[list[str] | None, typer.Option("--disable-store")] = None,
     servings_per_meal: Annotated[int | None, typer.Option("--servings", min=1)] = None,
     budget_max_eur: Annotated[float | None, typer.Option("--budget-max-eur", min=0.01)] = None,
+    split_min_savings_eur: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-eur",
+            min=0,
+            help="Économie minimale (€) pour accepter un panier éclaté.",
+        ),
+    ] = None,
+    split_min_savings_percent: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-percent",
+            min=0,
+            max=100,
+            help="Économie minimale (%) pour accepter un panier éclaté.",
+        ),
+    ] = None,
     notes: Annotated[str | None, typer.Option("--notes")] = None,
     clear_geo: Annotated[bool, typer.Option("--clear-geo-zone")] = False,
     clear_budget: Annotated[bool, typer.Option("--clear-budget")] = False,
+    clear_split: Annotated[
+        bool,
+        typer.Option("--clear-split", help="Revenir aux seuils par défaut (8 € / 10 %)."),
+    ] = False,
     data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
     output_format: OutputFormat = "text",
 ) -> None:
@@ -2269,6 +2351,13 @@ def profile_set(
         updates["budget_max_eur"] = budget_max_eur
     if clear_budget:
         updates["budget_max_eur"] = None
+    if clear_split:
+        updates["split_min_savings_eur"] = None
+        updates["split_min_savings_percent"] = None
+    if split_min_savings_eur is not None:
+        updates["split_min_savings_eur"] = split_min_savings_eur
+    if split_min_savings_percent is not None:
+        updates["split_min_savings_percent"] = split_min_savings_percent
     if notes is not None:
         updates["notes"] = notes
     stores = dict(household.stores)
@@ -3432,9 +3521,31 @@ def plan(
             help="Bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    split_min_savings_eur: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-eur",
+            min=0,
+            help="Économie minimale (€) pour recommander deux drives (défaut foyer, sinon 8).",
+        ),
+    ] = None,
+    split_min_savings_percent: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-percent",
+            min=0,
+            max=100,
+            help="Économie minimale (%) pour recommander deux drives (défaut foyer, sinon 10).",
+        ),
+    ] = None,
     output_format: OutputFormat = "text",
 ) -> None:
     _json = normalize_output_format(output_format) == "json"
+    split_limits = split_thresholds(
+        data_dir,
+        min_eur=split_min_savings_eur,
+        min_percent=split_min_savings_percent,
+    )
     if balanced and min_balance_score is None:
         min_balance_score = 70
     profile_data = load_profile(data_dir)
@@ -3537,6 +3648,7 @@ def plan(
             recommendation = recommend_basket(
                 items, offers, mode=mode, max_stores=max_stores,
                 compare_by=comparison, brand_preferences=brand_preferences,
+                **split_limits,
             )
         except ValueError as exc:
             echo_json({"recipes": [{"name": r.name} for r in selected], "items": [{"name": i.name} for i in items], "offers": [o.model_dump(mode="json") for o in offers], "recommendation": None, "error": str(exc)})
@@ -3563,6 +3675,7 @@ def plan(
             max_stores=max_stores,
             compare_by=comparison,
             brand_preferences=brand_preferences,
+            **split_limits,
         )
     except ValueError as exc:
         if collect:
@@ -3856,6 +3969,23 @@ def week(
             help="Bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    split_min_savings_eur: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-eur",
+            min=0,
+            help="Économie minimale (€) pour recommander deux drives (défaut foyer, sinon 8).",
+        ),
+    ] = None,
+    split_min_savings_percent: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-percent",
+            min=0,
+            max=100,
+            help="Économie minimale (%) pour recommander deux drives (défaut foyer, sinon 10).",
+        ),
+    ] = None,
     days: Annotated[
         int | None,
         typer.Option("--days", min=1, help="Nombre de jours du plan (avec --slots)."),
@@ -3877,6 +4007,11 @@ def week(
     ] = None,
 ) -> None:
     _json_week = normalize_output_format(output_format) == "json"
+    split_limits = split_thresholds(
+        data_dir,
+        min_eur=split_min_savings_eur,
+        min_percent=split_min_savings_percent,
+    )
     if balanced and min_balance_score is None:
         min_balance_score = 70
     try:
@@ -4062,6 +4197,7 @@ def week(
             max_stores=max_stores,
             compare_by=comparison,
             brand_preferences=brand_preferences,
+            **split_limits,
         )
     except ValueError as exc:
         if _json_week:
@@ -4116,9 +4252,31 @@ def compare(
             help="Afficher le bloc historique prix informatif si disponible.",
         ),
     ] = True,
+    split_min_savings_eur: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-eur",
+            min=0,
+            help="Économie minimale (€) pour recommander deux drives (défaut foyer, sinon 8).",
+        ),
+    ] = None,
+    split_min_savings_percent: Annotated[
+        float | None,
+        typer.Option(
+            "--split-min-savings-percent",
+            min=0,
+            max=100,
+            help="Économie minimale (%) pour recommander deux drives (défaut foyer, sinon 10).",
+        ),
+    ] = None,
     output_format: OutputFormat = "text",
 ) -> None:
     _json_cmp = normalize_output_format(output_format) == "json"
+    split_limits = split_thresholds(
+        data_dir,
+        min_eur=split_min_savings_eur,
+        min_percent=split_min_savings_percent,
+    )
     items = read_shopping_items(shopping_list)
     raw_offers = load_offers(prices) if prices is not None else load_price_cache(data_dir).offers
     comparison = normalize_compare_by(compare_by)
@@ -4129,6 +4287,7 @@ def compare(
             recommendation = recommend_basket(
                 items, offers, mode=mode, max_stores=max_stores,
                 compare_by=comparison, brand_preferences=brand_preferences,
+                **split_limits,
             )
         except ValueError as exc:
             echo_json({"items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items], "offers": [o.model_dump(mode="json") for o in offers], "recommendation": None, "error": str(exc)})
@@ -4155,6 +4314,7 @@ def compare(
         max_stores=max_stores,
         compare_by=comparison,
         brand_preferences=brand_preferences,
+        **split_limits,
     )
 
     echo_recommendation(

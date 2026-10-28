@@ -238,6 +238,122 @@ def test_dashboard_text_and_json(tmp_path: Path) -> None:
     assert parsed["files"]["recipes_count"] == 1
 
 
+def test_split_thresholds_default_when_nothing_configured(tmp_path: Path) -> None:
+    _base_profile(tmp_path)
+
+    assert cli.split_thresholds(tmp_path) == {}
+
+
+def test_split_thresholds_come_from_active_household(tmp_path: Path) -> None:
+    _base_profile(tmp_path)
+    create = RUNNER.invoke(
+        app,
+        [
+            "profile",
+            "create",
+            "foyer",
+            "--split-min-savings-eur",
+            "2.5",
+            "--split-min-savings-percent",
+            "12",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert create.exit_code == 0, create.output
+    RUNNER.invoke(app, ["profile", "use", "foyer", "--data-dir", str(tmp_path)])
+
+    assert cli.split_thresholds(tmp_path) == {
+        "split_min_savings_eur": 2.5,
+        "split_min_savings_percent": 12.0,
+    }
+
+
+def test_split_thresholds_cli_overrides_household(tmp_path: Path) -> None:
+    _base_profile(tmp_path)
+    RUNNER.invoke(
+        app,
+        [
+            "profile",
+            "create",
+            "foyer",
+            "--split-min-savings-eur",
+            "2.5",
+            "--split-min-savings-percent",
+            "12",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    RUNNER.invoke(app, ["profile", "use", "foyer", "--data-dir", str(tmp_path)])
+
+    assert cli.split_thresholds(tmp_path, min_eur=0.5) == {
+        "split_min_savings_eur": 0.5,
+        "split_min_savings_percent": 12.0,
+    }
+
+
+def test_profile_set_and_clear_split_thresholds(tmp_path: Path) -> None:
+    _base_profile(tmp_path)
+    RUNNER.invoke(app, ["profile", "create", "foyer", "--data-dir", str(tmp_path)])
+    RUNNER.invoke(app, ["profile", "use", "foyer", "--data-dir", str(tmp_path)])
+
+    updated = RUNNER.invoke(
+        app,
+        [
+            "profile",
+            "set",
+            "--split-min-savings-eur",
+            "4",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert updated.exit_code == 0, updated.output
+    household = load_household(tmp_path, "foyer")
+    assert household.split_min_savings_eur == 4.0
+    assert household.split_min_savings_percent is None
+
+    cleared = RUNNER.invoke(
+        app, ["profile", "set", "--clear-split", "--data-dir", str(tmp_path)]
+    )
+    assert cleared.exit_code == 0, cleared.output
+    household = load_household(tmp_path, "foyer")
+    assert household.split_min_savings_eur is None
+    assert household.split_min_savings_percent is None
+
+
+def test_split_thresholds_rejects_invalid_values(tmp_path: Path) -> None:
+    _base_profile(tmp_path)
+    negative = RUNNER.invoke(
+        app,
+        [
+            "profile",
+            "create",
+            "foyer",
+            "--split-min-savings-eur",
+            "-1",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert negative.exit_code != 0
+
+    too_high = RUNNER.invoke(
+        app,
+        [
+            "profile",
+            "create",
+            "foyer",
+            "--split-min-savings-percent",
+            "150",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert too_high.exit_code != 0
+
+
 def test_slugify_normalizes_names() -> None:
     assert slugify("Famille Allée") == "famille-allée"
     try:

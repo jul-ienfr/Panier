@@ -161,6 +161,54 @@ def test_hybrid_keeps_single_store_when_split_savings_too_small() -> None:
     assert recommendation.total == 4.0
 
 
+def test_hybrid_split_accepted_when_thresholds_lowered() -> None:
+    items = [ShoppingItem(name="riz"), ShoppingItem(name="tomates")]
+    offers = [
+        StoreOffer(store="leclerc", item="riz", product="Riz", price=1.0),
+        StoreOffer(store="leclerc", item="tomates", product="Tomates", price=5.0),
+        StoreOffer(store="intermarche", item="riz", product="Riz", price=3.0),
+        StoreOffer(store="intermarche", item="tomates", product="Tomates", price=1.0),
+    ]
+
+    default = recommend_basket(items, offers, PriceMode.HYBRID, max_stores=2)
+    lowered = recommend_basket(
+        items,
+        offers,
+        PriceMode.HYBRID,
+        max_stores=2,
+        split_min_savings_eur=0.5,
+        split_min_savings_percent=5.0,
+    )
+
+    assert default.stores == ("intermarche",)
+    assert default.total == 4.0
+    assert lowered.stores == ("intermarche", "leclerc")
+    assert lowered.total == 2.0
+    assert lowered.savings_vs_best_single == 2.0
+
+
+def test_hybrid_split_still_requires_both_thresholds() -> None:
+    items = [ShoppingItem(name="riz"), ShoppingItem(name="tomates")]
+    offers = [
+        StoreOffer(store="leclerc", item="riz", product="Riz", price=1.0),
+        StoreOffer(store="leclerc", item="tomates", product="Tomates", price=5.0),
+        StoreOffer(store="intermarche", item="riz", product="Riz", price=3.0),
+        StoreOffer(store="intermarche", item="tomates", product="Tomates", price=1.0),
+    ]
+
+    euro_only = recommend_basket(
+        items,
+        offers,
+        PriceMode.HYBRID,
+        max_stores=2,
+        split_min_savings_eur=0.5,
+        split_min_savings_percent=80.0,
+    )
+
+    assert euro_only.stores == ("intermarche",)
+    assert euro_only.total == 4.0
+
+
 def test_economic_can_split_between_stores() -> None:
     items = [ShoppingItem(name="riz"), ShoppingItem(name="tomates")]
     offers = [

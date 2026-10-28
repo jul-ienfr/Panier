@@ -50,6 +50,7 @@ panier plan --meals 3 --include-tags budget,rapide --max-prep-minutes 20
 panier plan --meals 3 --balanced
 panier plan --meals 3 --use-pantry --prices examples/prices.yaml --max-stores 2
 panier plan --meals 3 --collect leclerc,auchan --compare-by unit-price
+panier plan --meals 3 --collect leclerc,auchan --split-min-savings-eur 1.5 --split-min-savings-percent 8
 panier drive plan examples/shopping-list.yaml --drive leclerc
 panier drive open examples/shopping-list.yaml --drive leclerc --profile courses
 panier drive collect examples/shopping-list.yaml --drive auchan --output offers.yaml
@@ -195,6 +196,26 @@ Concrètement :
 - les requêtes drive sont générées par règles explicites (`build_drive_search_plan`) : nom canonique, marque commune, marque distributeur uniquement sur le drive compatible, sinon requête générique ;
 - la comparaison panier trie les magasins et choisit une solution stable en cas d'égalité (un seul drive avant un split équivalent, puis noms de drives triés) ;
 - sans `--collect`, Panier ne doit pas ouvrir de navigateur, appeler le réseau ou dépendre d'un LLM : les prix fournis localement sont la seule source d'offres.
+
+### Panier éclaté : seuils configurables
+
+En mode `hybrid` (défaut), Panier ne recommande deux drives que si **les deux**
+seuils sont atteints. Les valeurs par défaut sont **8 € et 10 %**.
+
+Par ordre de priorité : options CLI > foyer actif > défaut.
+
+```bash
+# ponctuel
+panier plan --collect leclerc,auchan --split-min-savings-eur 1.5 --split-min-savings-percent 8
+
+# persistant sur le foyer actif
+panier profile set --split-min-savings-eur 1.5 --split-min-savings-percent 8
+panier profile show          # affiche « Seuil panier éclaté: 1.50 € et 8.0 % »
+panier profile set --clear-split   # retour aux seuils par défaut
+```
+
+`--split-min-savings-percent` est borné à 100, `--split-min-savings-eur` à ≥ 0.
+Un seuil non renseigné garde sa valeur par défaut, indépendamment de l'autre.
 
 ### Runs panier / cart
 

@@ -36,6 +36,11 @@ class HouseholdProfile(BaseModel):
     stores: dict[str, bool] = Field(default_factory=dict)
     servings_per_meal: int | None = None
     budget_max_eur: float | None = None
+    # Seuils de décision du panier éclaté (split). None = défaut global du
+    # planner (8 € et 10 %) ; renseigner ici pour un foyer qui accepte, ou
+    # refuse, de faire deux drives pour moins que ça.
+    split_min_savings_eur: float | None = None
+    split_min_savings_percent: float | None = None
     notes: str | None = None
     preferences: FoodProfile = Field(default_factory=FoodProfile)
 
@@ -49,6 +54,22 @@ class HouseholdProfile(BaseModel):
                 "puis lettres, chiffres, - ou _, 40 caractères max)"
             )
         return slug
+
+    @field_validator("split_min_savings_eur", "split_min_savings_percent")
+    @classmethod
+    def validate_split_threshold(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("seuil d'économie négatif")
+        return float(value)
+
+    @field_validator("split_min_savings_percent")
+    @classmethod
+    def validate_split_percent_ceiling(cls, value: float | None) -> float | None:
+        if value is not None and value > 100:
+            raise ValueError("seuil d'économie en pourcentage > 100")
+        return value
 
     @field_validator("stores", mode="before")
     @classmethod
