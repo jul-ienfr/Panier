@@ -304,7 +304,7 @@ GitHub Actions (Python 3.11/3.12) exécute `ruff check`, `pytest` et `python scr
 | Store | Recherche | Collecte | Panier dry-run | Panier live |
 |---|---|---|---|---|
 | Leclerc | ✅ (tri=2/4) | ✅ validée | ✅ | ⚠️ anti-bot variable |
-| Auchan | ✅ | ✅ validée (profil `courses-auchan`, magasin Viuz En Sallaz sélectionné + checkpoint) | ✅ | ✅ validée |
+| Auchan | ✅ | ✅ validée (profil `courses-auchan`, magasin Viuz En Sallaz + checkpoint, 7/7 articles) | ✅ | ✅ validée |
 | Carrefour | ✅ (`/s?q=`) | ✅ validée (profil `courses-carrefour`, 15 offres) | ✅ flow dédié | code + fake-runner tests |
 | Super U | ✅ (`/recherche?q=`) | ✅ validée (profil `courses-superu`) | ✅ | ✅ |
 | Intermarché | URL connue | ❌ DataDome bloque l'extraction fiable | ❌ | ❌ |

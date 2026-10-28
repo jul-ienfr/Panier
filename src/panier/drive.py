@@ -241,6 +241,10 @@ _PRODUCT_EXTRACTION_JS = r"""
          titre propre, sinon « (62) Tomates rondes » n'est plus reconnu. */
       const clean = normalizedText({ textContent: value })
         .replace(/^\(\s*\d+\s*\)\s*/, '')
+        /* Les cartes concatènent le prix dans le texte du titre :
+           « Riz long grain 1kg 1,89€ / kg » → on coupe au prix pour ne garder
+           que la désignation produit (le prix est extrait séparément). */
+        .replace(/\s*\d+[,.]\d{1,2}\s*€(\s*\/\s*(kg|g|l|cl|ml|pièce|unité))?\s*$/i, '')
         .trim();
       if (clean.length > 2) return clean;
     }
@@ -385,22 +389,14 @@ def _extract_items_with_retry(
 
 
 def _offer_identity(offer: StoreOffer) -> str:
-    """Clé de dédup : URL + produit + prix.
+    """Clé de dédup : libellé replié + prix + prix au kilo.
 
-    Le JS d'extraction voit parent+enfant : le doublon réel a même URL ET
-    même titre. La clé composite évite de fusionner des produits distincts
-    quand l'URL est absente ou réduite à la base du magasin ("#").
+    Le JS d'extraction voit parent+enfant, et certains drives exposent le même
+    produit sous plusieurs identifiants (Auchan : `pr-C1240700` vs
+    `pr-C1224692`). L'URL n'est donc pas une clé fiable ; deux cartes de même
+    libellé au même prix sont le même produit.
     """
-    raw = str(offer.url or "").strip()
-    base = raw.split("#", 1)[0].strip().rstrip("/").lower()
-    if base and base not in ("http:", "https:") and "://" in base:
-        url_key = f"url:{base}"
-    else:
-        url_key = "url:-"
-    return (
-        f"{url_key}|{normalize_name(offer.product)}|"
-        f"{offer.price}|{offer.unit_price}"
-    )
+    return f"{fold_name(offer.product)}|{offer.price}|{offer.unit_price}"
 
 
 def _dedupe_offers(offers: list[StoreOffer]) -> list[StoreOffer]:
