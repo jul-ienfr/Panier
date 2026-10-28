@@ -48,8 +48,14 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
 python_version = "3.11"
-mypy_path = ["src", "/home/jul/projects/Hermes-Managed-Browser/server/sdk/python"]
+# Le SDK Managed Browser est un paquet local non publié : on ne le résout pas
+# via un chemin absolu (absent en CI), on ignore simplement ses imports.
+mypy_path = ["src"]
 explicit_package_bases = true
 no_implicit_optional = true
 warn_unused_ignores = false
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["managed_browser_client", "managed_browser_client.*"]
+ignore_missing_imports = true
