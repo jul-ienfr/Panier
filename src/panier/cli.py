@@ -2097,6 +2097,15 @@ def profile_init(
     typer.echo(f"Profil créé : {path}")
 
 
+def _format_split_thresholds(
+    eur: float | None, percent: float | None
+) -> str:
+    """Rend lisible un couple de seuils, avec « défaut » pour les non réglés."""
+    eur_text = f"{eur:.2f} €" if eur is not None else "défaut"
+    percent_text = f"{percent:.1f} %" if percent is not None else "défaut"
+    return f"{eur_text} et {percent_text}"
+
+
 def _echo_household_meta(household: HouseholdProfile) -> None:
     typer.echo(f"Foyer: {household.name}")
     if household.display_name:
@@ -2122,17 +2131,13 @@ def _echo_household_meta(household: HouseholdProfile) -> None:
         household.split_min_savings_eur is not None
         or household.split_min_savings_percent is not None
     ):
-        eur = (
-            f"{household.split_min_savings_eur:.2f} €"
-            if household.split_min_savings_eur is not None
-            else "défaut"
+        typer.echo(
+            "  Seuil panier éclaté: "
+            + _format_split_thresholds(
+                household.split_min_savings_eur,
+                household.split_min_savings_percent,
+            )
         )
-        pct = (
-            f"{household.split_min_savings_percent:.1f} %"
-            if household.split_min_savings_percent is not None
-            else "défaut"
-        )
-        typer.echo(f"  Seuil panier éclaté: {eur} et {pct}")
     if household.notes:
         typer.echo(f"  Notes: {household.notes}")
 
@@ -4439,11 +4444,18 @@ def _dashboard_payload(data_dir: Path, promo_since: str) -> dict[str, Any]:
             "geo_zone": household.geo_zone if household else None,
             "servings_per_meal": household.servings_per_meal if household else None,
             "budget_max_eur": household.budget_max_eur if household else None,
+            "split_min_savings_eur": (
+                household.split_min_savings_eur if household else None
+            ),
+            "split_min_savings_percent": (
+                household.split_min_savings_percent if household else None
+            ),
             "stores_enabled": sorted(store for store in known_stores if store_status(store)),
             "stores_disabled": sorted(store for store in known_stores if not store_status(store)),
         }
         if household
         else {"geo_zone": None, "servings_per_meal": None, "budget_max_eur": None,
+              "split_min_savings_eur": None, "split_min_savings_percent": None,
               "stores_enabled": sorted(known_stores), "stores_disabled": []},
         "files": {
             "recipes_count": recipes_count,
@@ -4529,6 +4541,20 @@ def dashboard(
     typer.echo(f"  Désactivés: {', '.join(meta['stores_disabled']) or '—'}")
     typer.echo(f"  Zone géographique: {meta['geo_zone'] or '—'}")
     typer.echo(f"  Budget max: {meta['budget_max_eur'] or '—'}")
+    typer.echo(
+        "  Seuil panier éclaté: "
+        + (
+            _format_split_thresholds(
+                meta.get("split_min_savings_eur"),
+                meta.get("split_min_savings_percent"),
+            )
+            if (
+                meta.get("split_min_savings_eur") is not None
+                or meta.get("split_min_savings_percent") is not None
+            )
+            else "défaut (8 € / 10 %)"
+        )
+    )
 
     files = payload["files"]
     history = payload["history"]

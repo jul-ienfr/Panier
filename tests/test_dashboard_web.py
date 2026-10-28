@@ -54,6 +54,24 @@ def test_render_html_escapes_and_uses_structured_layout() -> None:
     assert "Interface v2" in html
 
 
+def test_render_html_shows_split_threshold_default_and_configured() -> None:
+    default_html = render_dashboard_html({"preferences": {}, "promos": []})
+    assert "Seuil panier éclaté" in default_html
+    assert "défaut (8 € / 10 %)" in default_html
+
+    configured_html = render_dashboard_html(
+        {
+            "preferences": {},
+            "promos": [],
+            "household": {
+                "split_min_savings_eur": 1.5,
+                "split_min_savings_percent": 8.0,
+            },
+        }
+    )
+    assert "1.50 € et 8.0 %" in configured_html
+
+
 def test_render_html_shows_promos_table_and_store_chips() -> None:
     html = render_dashboard_html(
         {

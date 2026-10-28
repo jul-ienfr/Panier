@@ -102,9 +102,23 @@ def _household_card(active: Any, source: Any, meta: dict[str, Any]) -> str:
             ("Zone géographique", meta.get("geo_zone")),
             ("Portions / repas", meta.get("servings_per_meal")),
             ("Budget max", _euro(meta.get("budget_max_eur"))),
+            ("Seuil panier éclaté", _split_threshold(meta)),
         )
     )
     return _card("Foyer", rows)
+
+
+def _split_threshold(meta: dict[str, Any]) -> str:
+    """Seuil de split tel que configuré, sinon rappel des valeurs par défaut."""
+    eur = meta.get("split_min_savings_eur")
+    percent = meta.get("split_min_savings_percent")
+    if eur is None and percent is None:
+        return "défaut (8 € / 10 %)"
+    eur_text = f"{float(eur):.2f} €" if eur is not None else "défaut 8 €"
+    percent_text = (
+        f"{float(percent):.1f} %" if percent is not None else "défaut 10 %"
+    )
+    return f"{eur_text} et {percent_text}"
 
 
 def _preferences_card(prefs: dict[str, Any]) -> str:
