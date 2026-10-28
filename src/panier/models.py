@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
@@ -253,6 +254,18 @@ class StoreOffer(BaseModel):
 
 def normalize_name(value: str) -> str:
     return " ".join(value.strip().lower().replace("’", "'").split())
+
+
+def fold_name(value: str) -> str:
+    """Variante de :func:`normalize_name` sans diacritiques, pour le matching.
+
+    Les drives écrivent « Pâtes » quand les listes de courses utilisent
+    « pates » : les comparaisons produit↔besoin doivent se faire sur cette
+    forme repliée, alors que l'affichage garde les accents d'origine.
+    """
+    text = normalize_name(value).replace("œ", "oe").replace("æ", "ae")
+    text = unicodedata.normalize("NFD", text)
+    return "".join(char for char in text if unicodedata.category(char) != "Mn")
 
 
 def load_yaml_model(path: Path, model: type[T]) -> T:

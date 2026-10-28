@@ -68,6 +68,7 @@ class CatalogProduct(BaseModel):
     def normalize_tuple(cls, value: object) -> tuple[str, ...]:
         if value is None:
             return ()
+        values: list[object]
         if isinstance(value, str):
             values = [value]
         else:

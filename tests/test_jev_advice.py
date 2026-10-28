@@ -30,7 +30,9 @@ def _offer(product: str, price: float) -> StoreOffer:
 
 def test_validate_rejects_bad_criteria():
     with pytest.raises(ValueError):
-        jev_advice.validate_questions({"q": {"type": "choice", "instructions": "?", "criteria": "x"}})
+        jev_advice.validate_questions(
+            {"q": {"type": "choice", "instructions": "?", "criteria": "x"}}
+        )
     with pytest.raises(ValueError):
         jev_advice.validate_questions({})
 

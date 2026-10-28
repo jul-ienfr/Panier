@@ -173,7 +173,10 @@ def suggest_substitution(missing_item: str, substitutes: list[str]) -> dict[str,
                            ensure_ascii=False)
         res = jev_advice.evaluate(state, {"sub": {
             "type": "choice",
-            "instructions": "The item is unavailable. Substitute with a listed alternative, wait, or drop?",
+            "instructions": (
+                "The item is unavailable. Substitute with a listed alternative, "
+                "wait, or drop?"
+            ),
             "criteria": options,
         }})
         answer = (res.get("answers") or {}).get("sub", {})

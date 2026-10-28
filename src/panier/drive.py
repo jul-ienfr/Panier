@@ -12,7 +12,7 @@ from panier.managed_browser import (
     ManagedBrowserClient,
     ManagedBrowserError,
 )
-from panier.models import ShoppingItem, StoreOffer, normalize_name
+from panier.models import ShoppingItem, StoreOffer, fold_name, normalize_name
 
 
 class BrandType(StrEnum):
@@ -87,6 +87,11 @@ _STOPWORDS = {
 }
 
 _SYNONYMS: dict[str, tuple[str, ...]] = DEFAULT_SYNONYMS.copy()
+
+# Nombre de tokens de tête où le libellé doit apparaître pour être considéré
+# comme le produit principal (« Tomates pelées … ») et non un ingrédient
+# secondaire d'une préparation (« … poulet paprika et tomates »).
+_HEAD_TOKEN_WINDOW = 3
 
 # Drive Leclerc par défaut (magasin Ville-la-Grand / Annemasse). Le magasin
 # historique Viuz-en-Sallaz (027419) a fermé ; surcharger via
@@ -579,8 +584,8 @@ def _maybe_jev_reorder(item: ShoppingItem, ranked: list[OfferScore]) -> list[Off
 
 
 def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -> bool:
-    item_name = normalize_name(item.name)
-    product_name = normalize_name(offer.product)
+    item_name = fold_name(item.name)
+    product_name = fold_name(offer.product)
     if _violates_strict_exclusions(item_name, product_name):
         return False
     item_tokens = set(_tokens(item_name))
@@ -590,7 +595,16 @@ def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -
     required = _strict_required_tokens(item_tokens)
     if not required.issubset(product_tokens):
         return False
+    # Le libellé doit désigner le produit, pas figurer en fin de composition :
+    # « Palets de légumes ... courgettes » ou « Sachet cuisson poulet tomates »
+    # contiennent le mot sans être l'ingrédient demandé.
+    if not _tokens_head(product_name, _HEAD_TOKEN_WINDOW) & required:
+        return False
     return score >= 0.1 or item_name in product_name
+
+
+def _tokens_head(text: str, window: int) -> set[str]:
+    return set(_tokens(text)[:window])
 
 
 def _strict_required_tokens(tokens: set[str]) -> set[str]:
@@ -600,13 +614,69 @@ def _strict_required_tokens(tokens: set[str]) -> set[str]:
     return required
 
 
+# Formes de produit qui ne sont jamais un équivalent d'un ingrédient brut :
+# un pot pour bébé, une soupe ou une sauce tomate ne remplacent pas des tomates.
+_FORBIDDEN_PRODUCT_FORMS = {
+    "bebe",
+    "baby",
+    "4m",
+    "6m",
+    "8m",
+    "12m",
+    "soupe",
+    "potage",
+    "veloute",
+    "sauce",
+    "puree",
+    "coulis",
+    "concentre",
+    "croquettes",
+    "patee",
+    "chat",
+    "chien",
+    "salade",
+    "plat",
+    "cuisine",
+    "prepare",
+    "dessert",
+    "glace",
+    "boisson",
+    "chips",
+    "aperitif",
+    "taboule",
+    "gratin",
+    "risotto",
+    "pane",
+    "galette",
+    "beignet",
+    "quiche",
+    "pizza",
+    "lasagne",
+    "cake",
+    "tarte",
+}
+
+
 def _violates_strict_exclusions(item_name: str, product_name: str) -> bool:
+    item_tokens = set(_tokens(item_name))
+    product_tokens_all = set(_tokens(product_name))
+    # Comparaison par préfixe : les drives accordent et dérivent (« cuisinées »
+    # pour « cuisine »). Seules les formes d'au moins 5 lettres sont préfixées,
+    # sinon « chat » intercepterait « châtaigne ».
+    forbidden = {
+        token
+        for token in product_tokens_all
+        if any(len(form) >= 5 and token.startswith(form) for form in _FORBIDDEN_PRODUCT_FORMS)
+        or token in _FORBIDDEN_PRODUCT_FORMS
+    }
+    if forbidden - item_tokens:
+        return True
     exclusion_by_item = {
         "quinoa": {"boulgour", "ble", "lentilles", "carottes", "duo", "melange", "mélange"},
         "thon": {"huile"},
     }
     product_tokens = set(_tokens(product_name))
-    product_text = normalize_name(product_name)
+    product_text = fold_name(product_name)
     for item_token, excluded_tokens in exclusion_by_item.items():
         if item_token in item_name and (
             product_tokens & excluded_tokens
@@ -646,13 +716,22 @@ def _offer_from_browser_item(
         url=url,
     )
     scored = score_offer(item, candidate)
-    if normalize_name(item.name) in normalize_name(candidate.product):
-        confidence = "exact"
-    elif scored.score >= 0.75:
-        confidence = "exact"
-    elif scored.score >= 0.5:
-        confidence = "high"
-    elif scored.score >= 0.25:
+    # La confiance reflète le matching strict, pas le score lexical ni la
+    # simple inclusion du libellé : « petits pots bébé courgettes » contient
+    # bien « courgettes » mais n'est pas un équivalent. Sans ce garde-fou,
+    # tout produit mentionnant le mot s'affichait « exact ».
+    item_folded = fold_name(item.name)
+    product_folded = fold_name(candidate.product)
+    if _violates_strict_exclusions(item_folded, product_folded):
+        confidence = "low"
+    elif _is_strict_equivalent(item, candidate, scored.score):
+        if item_folded in product_folded:
+            confidence = "exact"
+        elif scored.score >= 0.5:
+            confidence = "high"
+        else:
+            confidence = "medium"
+    elif scored.score >= 0.4:
         confidence = "medium"
     else:
         confidence = "low"
@@ -710,15 +789,15 @@ def _absolute_product_url(drive_name: str, value: object) -> str | None:
 
 
 def _tokens(text: str) -> list[str]:
-    cleaned = normalize_name(text).replace("'", " ").replace("-", " ")
+    cleaned = fold_name(text).replace("'", " ").replace("-", " ")
     return [token for token in cleaned.split() if token not in _STOPWORDS and len(token) > 1]
 
 
 def _has_synonym_match(
     item_name: str, product_name: str, synonyms: dict[str, tuple[str, ...]] | None = None
 ) -> bool:
-    item = normalize_name(item_name)
-    product = normalize_name(product_name)
+    item = fold_name(item_name)
+    product = fold_name(product_name)
     for key, values in (synonyms or _SYNONYMS).items():
         candidates = (key, *values)
         if any(candidate in item for candidate in candidates):

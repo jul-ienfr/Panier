@@ -99,10 +99,10 @@ python -m panier.managed_browser_shim navigate --url ... --profile courses --sit
 
 - Base URL surchargeable : `PANIER_MANAGED_BROWSER_URL` (ex. `http://127.0.0.1:9388` pour un daemon secondaire).
 - Commande entièrement surchargeable : `PANIER_MANAGED_BROWSER_COMMAND` ou `--browser-command`.
-- Chaque drive exige son profil déclaré côté daemon (`courses`, `courses-auchan`, `courses-carrefour`, …), sinon erreur HTTP 500/404 de policy.
+- Chaque drive exige son profil déclaré côté daemon (`courses`, `courses-auchan`, `courses-carrefour`, `courses-superu`, …), sinon erreur HTTP 500/404 de policy.
 - `drive pick` choisit ensuite le meilleur produit parmi des offres collectées : correspondance du type demandé d’abord, puis prix.
 
-État de la validation live (daemon v2) : shim et chaîne navigate/console-eval validés sur le daemon réel ; Leclerc a migré de domaine (recherche à re-qualifier) ; Auchan répond sans anti-bot mais exige la sélection du magasin sur un profil neuf (sinon toutes les cartes sont `outOfStock`).
+État de la validation live (daemon v2) : shim et chaîne navigate/console-eval validés sur le daemon réel ; Leclerc, Carrefour et Super U collectent avec prix au kilo ; Auchan répond sans anti-bot mais exige la sélection du magasin sur un profil neuf (sinon toutes les cartes sont `outOfStock`) ; Intermarché reste bloqué par DataDome.
 
 ### Recettes comme source primaire
 
@@ -305,10 +305,11 @@ GitHub Actions (Python 3.11/3.12) exécute `ruff check`, `pytest` et `python scr
 |---|---|---|---|---|
 | Leclerc | ✅ (tri=2/4) | ✅ validée | ✅ | ⚠️ anti-bot variable |
 | Auchan | ✅ | ✅ validée | ✅ | ✅ validée |
-| Carrefour | ✅ (`/s?q=`) | ✅ extraction générique | ✅ flow dédié | code + fake-runner tests ; validation live à faire avec le profil `courses-carrefour` |
+| Carrefour | ✅ (`/s?q=`) | ✅ validée (profil `courses-carrefour`, 15 offres) | ✅ flow dédié | code + fake-runner tests |
+| Super U | ✅ (`/recherche?q=`) | ✅ validée (profil `courses-superu`) | ✅ | ✅ |
 | Intermarché | URL connue | ❌ DataDome bloque l'extraction fiable | ❌ | ❌ |
 
-Chaque drive exige son profil déclaré côté Managed Browser (`courses`, `courses-auchan`, `courses-carrefour`) : un profil manquant provoque une erreur HTTP 500 de politique. Le profil est résolu automatiquement par `managed_browser_profile_for_drive`.
+Chaque drive exige son profil déclaré côté Managed Browser (`courses`, `courses-auchan`, `courses-carrefour`, `courses-superu`) : un profil manquant provoque une erreur HTTP 500 de politique. Le profil est résolu automatiquement par `managed_browser_profile_for_drive`.
 
 ## Déterminisme et garde-fou LLM
 

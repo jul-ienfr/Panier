@@ -453,7 +453,9 @@ def recommend_basket(
     savings_percent = (savings / best_single[1]) * 100 if best_single[1] else 0.0
 
     if mode == PriceMode.HYBRID and len(best_split[0]) > 1:
-        if savings < split_min_savings_eur and savings_percent < split_min_savings_percent:
+        # Les deux seuils doivent être atteints : un gain de 12 % sur un panier
+        # de 6 € (0,80 €) ne justifie pas un second magasin.
+        if savings < split_min_savings_eur or savings_percent < split_min_savings_percent:
             return BasketRecommendation(
                 mode=mode,
                 stores=best_single[0],

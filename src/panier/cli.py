@@ -736,7 +736,8 @@ def cart_flow_value(result: BrowserCommandResult) -> dict:
 
 
 def _cart_result_counts(value: dict, action: str) -> dict[str, int]:
-    catalog_found: list = list(value.get("catalog_found")) if isinstance(value.get("catalog_found"), list) else []
+    raw_catalog = value.get("catalog_found")
+    catalog_found: list = list(raw_catalog) if isinstance(raw_catalog, list) else []
     if action == "remove":
         available = value.get("removable") if isinstance(value.get("removable"), list) else []
         done = value.get("removed") if isinstance(value.get("removed"), list) else []
