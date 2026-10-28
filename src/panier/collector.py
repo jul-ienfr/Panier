@@ -61,12 +61,19 @@ def managed_browser_profile_for_drive(profile: str, drive: str) -> str:
 
     Le profil historique `courses` reste valide pour Leclerc, mais chaque autre
     drive est déclaré côté Managed Browser sous son propre profil
-    (`courses-auchan`, `courses-carrefour`). Utiliser un profil non déclaré
-    déclenche une erreur HTTP 500 de politique de profil.
+    (`courses-auchan`, `courses-carrefour`, `courses-superu`). Utiliser un profil
+    non déclaré déclenche une erreur HTTP 500 de politique de profil.
+
+    Deux drives ne doivent jamais partager le même profil : une collecte
+    parallèle les ferait naviguer dans la même session et la seconde navigation
+    interromprait la première (« Navigation ... is interrupted by another
+    navigation »), voire détruirait la session.
     """
     normalized_profile = normalize_name(profile)
     normalized_drive = normalize_name(drive)
-    if normalized_profile == "courses" and normalized_drive in {"auchan", "carrefour"}:
+    if normalized_profile == "courses" and normalized_drive:
+        if normalized_drive == "leclerc":
+            return profile
         return f"courses-{normalized_drive}"
     return profile
 

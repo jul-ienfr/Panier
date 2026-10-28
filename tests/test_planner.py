@@ -1196,6 +1196,13 @@ def test_auchan_uses_dedicated_managed_browser_profile() -> None:
     assert managed_browser_profile_for_drive("custom", "auchan") == "custom"
 
 
+def test_each_drive_gets_its_own_managed_browser_profile() -> None:
+    """Aucun drive ne partage de session : sinon navigation concurrente = 500."""
+    drives = ["leclerc", "carrefour", "superu", "auchan", "intermarche"]
+    profiles = {managed_browser_profile_for_drive("courses", drive) for drive in drives}
+    assert len(profiles) == len(drives)
+
+
 def test_drive_collect_auchan_uses_dedicated_profile(tmp_path: Path, monkeypatch) -> None:
     shopping = tmp_path / "shopping.yaml"
     shopping.write_text("items:\n  - name: riz\n", encoding="utf-8")
