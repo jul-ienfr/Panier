@@ -596,7 +596,11 @@ def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -
         return score >= 0.5
     required = _strict_required_tokens(item_tokens)
     if not required.issubset(product_tokens):
-        return False
+        # Synonyme métier (« tomates concassées » ≈ « pulpe de tomate ») : les
+        # tokens littéraux diffèrent, mais le produit reste le bon. Exiger que
+        # le synonyme soit en tête évite de valider une simple mention en fin
+        # de composition (« plat cuisiné … pulpe de tomate »).
+        return _synonym_head_match(item_name, product_name)
     # Le libellé doit désigner le produit, pas figurer en fin de composition :
     # « Palets de légumes ... courgettes » ou « Sachet cuisson poulet tomates »
     # contiennent le mot sans être l'ingrédient demandé.
@@ -607,6 +611,23 @@ def _is_strict_equivalent(item: ShoppingItem, offer: StoreOffer, score: float) -
 
 def _tokens_head(text: str, window: int) -> set[str]:
     return set(_tokens(text)[:window])
+
+
+def _synonym_head_match(item_name: str, product_name: str) -> bool:
+    """Le synonyme du produit demandé apparaît-il en tête du libellé ?"""
+    item = fold_name(item_name)
+    head = set(_tokens(product_name)[:_HEAD_TOKEN_WINDOW])
+    if not head:
+        return False
+    for key, values in _SYNONYMS.items():
+        candidates = tuple(fold_name(candidate) for candidate in (key, *values))
+        if not any(candidate in item for candidate in candidates):
+            continue
+        for candidate in candidates:
+            candidate_tokens = _tokens(candidate)
+            if candidate_tokens and set(candidate_tokens).issubset(head):
+                return True
+    return False
 
 
 def _strict_required_tokens(tokens: set[str]) -> set[str]:
@@ -729,7 +750,7 @@ def _offer_from_browser_item(
     elif _is_strict_equivalent(item, candidate, scored.score):
         if item_folded in product_folded:
             confidence = "exact"
-        elif scored.score >= 0.5:
+        elif _synonym_head_match(item_folded, product_folded) or scored.score >= 0.5:
             confidence = "high"
         else:
             confidence = "medium"

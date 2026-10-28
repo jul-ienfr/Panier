@@ -51,3 +51,40 @@ def test_keyword_in_tail_is_not_the_main_product() -> None:
 def test_plain_product_stays_exact() -> None:
     offer = _offer("tomates", "Tomates pelées Notre Jardin Entières 238g")
     assert offer.confidence == "exact"
+
+
+def test_synonym_at_head_is_high_confidence() -> None:
+    """« tomates concassées » ≈ « Pulpe de tomate » : bon produit, pas exact."""
+    offer = _offer("tomates concassées", "Pulpe de tomate Turini Nature 390g")
+    assert offer.confidence == "high"
+
+
+def test_synonym_in_tail_is_still_rejected() -> None:
+    offer = _offer("tomates concassées", "Plat cuisiné poulet pulpe de tomate 400g")
+    assert offer.confidence == "low"
+
+
+def test_dedupe_ignores_duplicate_product_ids() -> None:
+    """Auchan expose le même produit sous deux IDs : une seule offre."""
+    from panier.drive import _dedupe_offers
+    from panier.models import StoreOffer
+
+    offers = [
+        StoreOffer(
+            store="auchan",
+            item="riz",
+            product="AUCHAN Riz long grain incollable 1kg",
+            price=1.83,
+            unit_price=1.83,
+            url="https://www.auchan.fr/auchan-riz-long-grain-incollable/pr-C1240700",
+        ),
+        StoreOffer(
+            store="auchan",
+            item="riz",
+            product="AUCHAN Riz long grain incollable 1kg",
+            price=1.83,
+            unit_price=1.83,
+            url="https://www.auchan.fr/auchan-riz-long-grain-incollable/pr-C1224692",
+        ),
+    ]
+    assert len(_dedupe_offers(offers)) == 1
