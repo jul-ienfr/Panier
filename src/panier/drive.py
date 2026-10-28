@@ -236,7 +236,13 @@ _PRODUCT_EXTRACTION_JS = r"""
     for (const selector of candidates) {
       const found = node.querySelector(selector);
       const value = found?.getAttribute?.('aria-label') || found?.textContent;
-      if (value && value.trim().length > 2) return value.trim();
+      /* Les libellés des drives sont multilignes et préfixés par des compteurs
+         (« (62) », avis) : on les replie pour que le matching travaille sur un
+         titre propre, sinon « (62) Tomates rondes » n'est plus reconnu. */
+      const clean = normalizedText({ textContent: value })
+        .replace(/^\(\s*\d+\s*\)\s*/, '')
+        .trim();
+      if (clean.length > 2) return clean;
     }
     return '';
   };
