@@ -257,6 +257,10 @@ Deux sources de vérité, dans cet ordre :
 
 Leclerc et Intermarché n'exposent aucun badge promo exploitable dans leur DOM : pour ces deux drives, seule la détection par baisse de prix fonctionne.
 
+Les drives réutilisent un même libellé pour plusieurs références (Carrefour : « Morceaux de Thon au Naturel SIMPL » à 0,99 € et 1,95 €). L'identité d'un produit est donc sa **référence de fiche lue dans l'URL** — EAN chez Carrefour (`/p/courgettes-3276558381121`), id de fiche chez Super U (`/459339.html`) — et seulement à défaut le couple `libellé + prix au kilo`. Leclerc ne met dans son URL que des numéros de magasin : il reste sur le repli libellé + €/kg.
+
+Le libellé du badge est filtré : Super U place « Afficher le prix 3,46 € /pers » dans le même bloc que ses vrais badges, ce n'est pas une promo.
+
 Chaque collecte stocke aussi `promo` et `promo_label` sur l'offre ; une migration additive (`ALTER TABLE`) ajoute la colonne aux bases existantes sans perdre l'historique.
 
 Le bloc « Historique prix » affiché par `compare/plan/week` est strictement informatif (`--no-price-history` pour le taire) : il ne change jamais la recommandation.
