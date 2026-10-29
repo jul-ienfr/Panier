@@ -31,11 +31,19 @@ CREATE TABLE IF NOT EXISTS offers (
     price REAL NOT NULL,
     unit_price REAL,
     promo INTEGER NOT NULL DEFAULT 0,
-    url TEXT
+    url TEXT,
+    promo_label TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_offers_item_store_time
     ON offers (canonical_name, store, collected_at);
 """
+
+# Colonnes ajoutées après la première version du schéma : les bases
+# existantes doivent être migrées à l'ouverture, sinon les lectures
+# échouent sur un `no such column`.
+_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("offers", "promo_label TEXT"),
+)
 
 _QUANTITY_UNIT_RE = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*(kg|g|l|cl|ml)\b",
@@ -84,7 +92,19 @@ def connect(data_dir: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(_SCHEMA)
+    _apply_migrations(conn)
     return conn
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Ajoute les colonnes manquantes aux bases créées par une version antérieure."""
+    for table, column_spec in _MIGRATIONS:
+        column = column_spec.split()[0]
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column in existing:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_spec}")
+        conn.commit()
 
 
 @dataclass(frozen=True)
@@ -101,6 +121,7 @@ class HistoryPoint:
     unit_price: float | None
     promo: bool
     url: str | None
+    promo_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,8 +231,8 @@ def record_offers(
                 """
                 INSERT INTO offers (
                     collected_at, store, canonical_name, product_title, brand,
-                    quantity, unit, price, unit_price, promo, url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quantity, unit, price, unit_price, promo, url, promo_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -223,8 +244,9 @@ def record_offers(
                         *parse_quantity_unit(offer.product),
                         float(offer.price),
                         float(offer.unit_price) if offer.unit_price is not None else None,
-                        0,
+                        1 if offer.promo else 0,
                         offer.url,
+                        offer.promo_label,
                     )
                     for offer in offers
                 ],
@@ -254,7 +276,7 @@ def offers_for_item(
         rows = conn.execute(
             f"""
             SELECT id, collected_at, store, canonical_name, product_title, brand,
-                   quantity, unit, price, unit_price, promo, url
+                   quantity, unit, price, unit_price, promo, url, promo_label
             FROM offers
             WHERE {" AND ".join(clauses)}
             ORDER BY collected_at ASC, id ASC
@@ -280,6 +302,7 @@ def _point_from_row(row: tuple) -> HistoryPoint:
         unit_price=float(row[9]) if row[9] is not None else None,
         promo=bool(row[10]),
         url=row[11],
+        promo_label=row[12],
     )
 
 
@@ -289,6 +312,77 @@ def _median(values: list[float]) -> float:
     if len(ordered) % 2 == 1:
         return ordered[middle]
     return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+# Baisse minimale, sur un MÊME produit, pour parler de promo. Comparer deux
+# produits différents du même ingrédient (« Spaghetti Eco+ 1 kg » à 0,88 € vs
+# « Penne Turini 500 g » à 0,55 €) ne mesure pas une promotion mais un
+# changement de référence : c'était la source des faux positifs.
+MIN_PROMO_DROP_PCT = 10.0
+
+
+@dataclass(frozen=True)
+class PromoSignal:
+    """Promo observée : badge affiché par le drive ou baisse sur le même produit."""
+
+    canonical_name: str
+    store: str
+    product_title: str
+    last_price: float
+    reference_price: float | None
+    delta_pct: float | None
+    observations: int
+    last_collected_at: str
+    promo_label: str | None = None
+    # "badge" = le drive annonce l'offre ; "price_drop" = même produit moins cher
+    # que sa propre médiane historique.
+    reason: str = "price_drop"
+    # Les drives réutilisent le même libellé pour deux formats : le prix au kilo
+    # est le seul moyen de distinguer « 530 g à 1,45 € » de « 220 g à 0,69 € ».
+    unit_price: float | None = None
+
+
+def _product_key(point: HistoryPoint) -> str:
+    """Identité d'un produit : libellé + prix au kilo.
+
+    Les drives réutilisent le même libellé pour plusieurs formats : chez
+    Carrefour, « SIMPL Riz Long Etuvé SIMPL » existe à 1,35 € (1,35 €/kg) et à
+    0,89 € (1,78 €/kg), et « MUTTI Pulpe de tomate » à 1,09 / 2,55 / 2,95 €.
+    Sans le prix au kilo, ces références se mélangent et la moins chère passe
+    pour une promo permanente.
+    """
+    unit_price = point.unit_price
+    price_part = "" if unit_price is None else round(unit_price, 3)
+    return f"{normalize_name(point.product_title)}|{price_part}"
+
+
+def _promo_signal(points: list[HistoryPoint]) -> PromoSignal | None:
+    """Signal promo pour un groupe de points d'un même produit."""
+    if not points:
+        return None
+    last = max(points, key=lambda point: (point.collected_at, point.id))
+    prices = [point.price for point in points]
+    reference = _median(prices) if len(prices) > 1 else None
+    delta_pct = None
+    if reference and reference > 0:
+        delta_pct = (last.price - reference) / reference * 100
+    badge = last.promo or bool(last.promo_label)
+    drop = delta_pct is not None and delta_pct <= -MIN_PROMO_DROP_PCT
+    if not badge and not drop:
+        return None
+    return PromoSignal(
+        canonical_name=last.canonical_name,
+        store=last.store,
+        product_title=last.product_title,
+        last_price=last.price,
+        reference_price=reference,
+        delta_pct=delta_pct,
+        observations=len(prices),
+        last_collected_at=last.collected_at,
+        promo_label=last.promo_label,
+        reason="badge" if badge else "price_drop",
+        unit_price=last.unit_price,
+    )
 
 
 def trend_for_item(
@@ -341,8 +435,15 @@ def promo_candidates(
     data_dir: Path,
     *,
     since: datetime | None = None,
-) -> list[PriceTrend]:
-    """Prix courant (dernier point par item+store) sous la médiane historique."""
+) -> list[PromoSignal]:
+    """Promos réelles : badge du drive, ou baisse ≥ 10 % sur un MÊME produit.
+
+    Le regroupement se fait par (ingrédient, magasin, libellé, prix au kilo) :
+    comparer des références différentes du même ingrédient (« Pâtes Eco+ 1 kg »
+    à 0,88 € et « Penne Turini 500 g » à 0,55 €) fabriquait des faux positifs
+    permanents, et ignorer le prix au kilo mélangeait les formats d'un même
+    libellé.
+    """
     conn = connect(data_dir)
     try:
         clauses = ["1 = 1"]
@@ -350,23 +451,30 @@ def promo_candidates(
         if since is not None:
             clauses.append("collected_at >= ?")
             params.append(since.isoformat(timespec="seconds"))
-        groups = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT canonical_name, store FROM offers
+            SELECT id, collected_at, store, canonical_name, product_title, brand,
+                   quantity, unit, price, unit_price, promo, url, promo_label
+            FROM offers
             WHERE {" AND ".join(clauses)}
-            GROUP BY canonical_name, store
-            ORDER BY canonical_name ASC, store ASC
+            ORDER BY collected_at ASC, id ASC
             """,
             params,
         ).fetchall()
     finally:
         conn.close()
-    candidates: list[PriceTrend] = []
-    for canonical_name, store in groups:
-        trend = trend_for_item(data_dir, str(canonical_name), store=str(store), since=since)
-        if trend is not None and trend.is_promo_candidate:
-            candidates.append(trend)
-    return candidates
+    groups: dict[tuple[str, str, str], list[HistoryPoint]] = {}
+    for row in rows:
+        point = _point_from_row(row)
+        key = (point.canonical_name, point.store, _product_key(point))
+        groups.setdefault(key, []).append(point)
+    signals: list[PromoSignal] = []
+    for points in groups.values():
+        signal = _promo_signal(points)
+        if signal is not None:
+            signals.append(signal)
+    signals.sort(key=lambda signal: (signal.canonical_name, signal.store, signal.product_title))
+    return signals
 
 
 def parse_since(value: str | None, *, now: datetime | None = None) -> datetime | None:

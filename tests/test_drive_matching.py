@@ -88,3 +88,75 @@ def test_dedupe_ignores_duplicate_product_ids() -> None:
         ),
     ]
     assert len(_dedupe_offers(offers)) == 1
+
+
+def test_dedupe_keeps_promo_variant_when_duplicates_differ() -> None:
+    """Deux cartes identiques, une avec badge promo : on garde le badge."""
+    from panier.drive import _dedupe_offers
+    from panier.models import StoreOffer
+
+    plain = StoreOffer(store="carrefour", item="tomates", product="Tomates grappe", price=3.59)
+    badged = StoreOffer(
+        store="carrefour",
+        item="tomates",
+        product="Tomates grappe",
+        price=3.59,
+        promo=True,
+        promo_label="-10% Club",
+    )
+
+    assert [offer.promo for offer in _dedupe_offers([plain, badged])] == [True]
+    assert [offer.promo for offer in _dedupe_offers([badged, plain])] == [True]
+
+
+def test_parse_euro_price_handles_every_observed_drive_format() -> None:
+    """Verrou anti-régression : les prix Carrefour/Super U étaient tronqués.
+
+    Carrefour sépare les centimes par des espaces (« 3  ,59  € ») et Super U
+    annonce parfois le prix en toutes lettres ; l'ancien parseur ne prenait que
+    le premier groupe de chiffres, ce qui ramenait 100 % des prix Carrefour à
+    leur partie entière et faussait toutes les comparaisons.
+    """
+    from panier.drive import _parse_euro_price
+
+    assert _parse_euro_price("1,99 €") == 1.99
+    assert _parse_euro_price("3  ,59  €") == 3.59
+    assert _parse_euro_price("0  ,99  €") == 0.99
+    assert _parse_euro_price("3.59 € / KG") == 3.59
+    assert _parse_euro_price("3 euros 84 centimes") == 3.84
+    assert _parse_euro_price("3 euros 84 centimes\n12 euros 80 le kilogramme\n3,84 €") == 3.84
+    assert _parse_euro_price("1€99") == 1.99
+    assert _parse_euro_price("0€89") == 0.89
+    assert _parse_euro_price("1 234,56 €") == 1234.56
+    assert _parse_euro_price("12,5 €") == 12.5
+    assert _parse_euro_price("12€") == 12.0
+    assert _parse_euro_price(2.49) == 2.49
+    assert _parse_euro_price("0,00 €") is None
+    assert _parse_euro_price(None) is None
+    assert _parse_euro_price("   ") is None
+
+
+def test_promo_badge_from_drive_is_propagated() -> None:
+    """Le badge promo du DOM est conservé sur l'offre (source fiable)."""
+    offer = _offer_from_browser_item(
+        ShoppingItem(name="tomates"),
+        "carrefour",
+        {
+            "title": "Tomates rondes en grappe vrac",
+            "price": "3  ,59  €",
+            "promo": True,
+            "promoLabel": "-10% Club",
+        },
+    )
+
+    assert offer is not None
+    assert offer.price == 3.59
+    assert offer.promo is True
+    assert offer.promo_label == "-10% Club"
+
+
+def test_no_promo_badge_keeps_offer_clean() -> None:
+    offer = _offer("riz", "Riz long grain 1kg")
+
+    assert offer.promo is False
+    assert offer.promo_label is None

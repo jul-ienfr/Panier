@@ -250,16 +250,53 @@ _PRODUCT_EXTRACTION_JS = r"""
     }
     return '';
   };
+  /* Badge promo : chaque drive l'expose dans son propre DOM (Carrefour
+     « sticker-promo », Auchan « product-discount-label », Super U
+     « product-promotion-banner »). On lit l'étiquette réelle plutôt que de
+     déduire une promo d'une baisse de prix entre deux collectes : la collecte
+     ne voit qu'un instantané, le drive sait qu'il y a une offre. */
+  const promoLabelText = (node) => {
+    const prioritized = [
+      '.sticker-promo__text', '.product-discount-label',
+      '.product-promotion-banner', '[class*=promo i]', '[class*=discount i]',
+      '[class*=remise i]', '[class*=reduction i]', '[class*=prix-choc i]'
+    ];
+    for (const selector of prioritized) {
+      for (const found of node.querySelectorAll(selector)) {
+        const label = normalizedText(found);
+        if (
+          label
+          && label.length <= 60
+          && /promo|discount|remise|reduc|%|choc|mini|euro|€|cagnott|club|anti.?gaspi/i.test(label)
+        ) {
+          return label;
+        }
+      }
+    }
+    return '';
+  };
   const nodes = Array.from(document.querySelectorAll(
     '.liWCRS310_Product, [data-testid*=product], [class*=product], [class*=Product], article, li'
   ));
   const items = [];
+  const seen = new Set();
   for (const node of nodes) {
     const title = titleText(node);
     const price = priceText(node);
     if (!title || !price) continue;
+    /* Les sélecteurs sont larges (article, li, [class*=product]) et un même
+       produit apparaît dans plusieurs conteneurs imbriqués : sans dédup, le
+       même article était enregistré 2 à 3 fois par collecte, ce qui gonflait
+       artificiellement les observations de l'historique. */
+    const key = `${title}|${price}|${unitText(node)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const link = node.querySelector('a[href]')?.href || '';
-    items.push({ title, price, unitPrice: unitText(node), url: link });
+    const promoLabel = promoLabelText(node);
+    items.push({
+      title, price, unitPrice: unitText(node), url: link,
+      promo: promoLabel !== '', promoLabel,
+    });
   }
   return { items };
 })()
@@ -400,15 +437,24 @@ def _offer_identity(offer: StoreOffer) -> str:
 
 
 def _dedupe_offers(offers: list[StoreOffer]) -> list[StoreOffer]:
-    """Déduplique en préservant l'ordre (JS d'extraction voit parent+enfant)."""
-    seen: set[str] = set()
+    """Déduplique en préservant l'ordre (JS d'extraction voit parent+enfant).
+
+    Un même produit peut apparaître deux fois, une carte portant le badge promo
+    et l'autre non (parent/enfant, variantes de gabarit) : on garde alors la
+    version qui porte l'information promo, sinon on perd l'offre.
+    """
+    index_by_key: dict[str, int] = {}
     unique: list[StoreOffer] = []
     for offer in offers:
         key = _offer_identity(offer)
-        if key in seen:
+        position = index_by_key.get(key)
+        if position is None:
+            index_by_key[key] = len(unique)
+            unique.append(offer)
             continue
-        seen.add(key)
-        unique.append(offer)
+        current = unique[position]
+        if offer.promo and not current.promo:
+            unique[position] = offer
     return unique
 
 
@@ -729,6 +775,7 @@ def _offer_from_browser_item(
         return None
     unit_price = _parse_euro_price(raw.get("unitPrice") or raw.get("unit_price"))
     url = _absolute_product_url(drive_name, raw.get("url"))
+    promo_label = str(raw.get("promoLabel") or "").strip()
     candidate = StoreOffer(
         store=canonical_drive_name(drive_name),
         item=item.name,
@@ -737,6 +784,8 @@ def _offer_from_browser_item(
         unit_price=unit_price,
         confidence="medium",
         url=url,
+        promo=bool(raw.get("promo")) or bool(promo_label),
+        promo_label=promo_label or None,
     )
     scored = score_offer(item, candidate)
     # La confiance reflète le matching strict, pas le score lexical ni la
@@ -761,17 +810,26 @@ def _offer_from_browser_item(
     return candidate.model_copy(update={"confidence": confidence})
 
 
-def _parse_euro_price(value: object) -> float | None:
-    if value is None:
+# « 3 euros 84 centimes » : les drives accessibles annoncent parfois le prix
+# en toutes lettres avant le format numérique.
+_VERBAL_PRICE_RE = re.compile(
+    r"(\d+)\s*euros?(?:\s*(?:et\s*)?(\d{1,2})\s*centimes?)?",
+    re.IGNORECASE,
+)
+# « 1€99 » / « 0€89 » : centimes collés après le symbole, sans séparateur.
+_CENTS_AFTER_SYMBOL_RE = re.compile(r"(\d+)\s*(?:€|eur)\s*(\d{2})(?!\d)", re.IGNORECASE)
+# Nombre monétaire : chiffres, espaces (milliers Carrefour « 1 234 ») et un
+# séparateur éventuellement entouré d'espaces (« 3  ,59  € »).
+_MONEY_AMOUNT_RE = re.compile(
+    r"(\d+(?:[\s.\u00a0\u202f]\d{3})*(?:\s*[.,]\s*\d{1,2})?|\d+)"
+)
+
+
+def _decimal_from_amount(fragment: str) -> float | None:
+    """Convertit « 1 234,56 », « 3  ,59 » ou « 3.59 » en flottant."""
+    number = re.sub(r"[\s\u00a0\u202f]", "", fragment).strip(".,")
+    if not number:
         return None
-    if isinstance(value, int | float):
-        return float(value) if value > 0 else None
-    text = str(value).replace("\xa0", " ").replace("\u202f", " ").strip()
-    match = re.search(r"(\d+(?:[\s.,]\d{3})*(?:[,.]\d{1,2})?|\d+)", text)
-    if not match:
-        return None
-    number = match.group(1).replace(" ", "")
-    # Formats mixtes : le séparateur le plus à droite est la décimale.
     if "," in number and "." in number:
         if number.rfind(",") > number.rfind("."):
             number = number.replace(".", "").replace(",", ".")
@@ -779,21 +837,54 @@ def _parse_euro_price(value: object) -> float | None:
             number = number.replace(",", "")
     elif "," in number:
         head, _, tail = number.rpartition(",")
-        if len(tail) in (1, 2):
+        if len(tail) in (1, 2) and tail.isdigit():
             number = f"{head.replace(',', '')}.{tail}"
         else:
             number = head.replace(",", "") + tail
     elif "." in number:
         head, _, tail = number.rpartition(".")
-        if len(tail) in (1, 2):
+        if len(tail) in (1, 2) and tail.isdigit():
             number = f"{head.replace('.', '')}.{tail}"
         else:
             number = head.replace(".", "") + tail
     try:
-        parsed = float(number)
+        return float(number)
     except ValueError:
         return None
-    return parsed if parsed > 0 else None
+
+
+def _parse_euro_price(value: object) -> float | None:
+    """Extrait un prix en euros, quel que soit le format du drive.
+
+    Formats réellement observés : « 1,99 € », « 3  ,59  € » (Carrefour),
+    « 3 euros 84 centimes » (Super U, prix en toutes lettres), « 1€99 »,
+    « 1 234,56 € ». Le premier montant rencontré gagne : les textes Super U
+    concatènent prix, prix au kilo puis re-prix, tous dans l'ordre.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value) if value > 0 else None
+    text = re.sub(r"[\s\u00a0\u202f]+", " ", str(value)).strip()
+    if not text:
+        return None
+    verbal = _VERBAL_PRICE_RE.search(text)
+    if verbal is not None:
+        euros = int(verbal.group(1))
+        cents = int(verbal.group(2) or 0)
+        parsed = euros + cents / 100
+        return parsed if parsed > 0 else None
+    glued = _CENTS_AFTER_SYMBOL_RE.search(text)
+    if glued is not None:
+        parsed = int(glued.group(1)) + int(glued.group(2)) / 100
+        return parsed if parsed > 0 else None
+    match = _MONEY_AMOUNT_RE.search(text)
+    if not match:
+        return None
+    amount = _decimal_from_amount(match.group(1))
+    if amount is None or amount <= 0:
+        return None
+    return amount
 
 
 def _absolute_product_url(drive_name: str, value: object) -> str | None:

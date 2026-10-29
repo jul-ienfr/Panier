@@ -1909,6 +1909,8 @@ else:
                 "unit_price": 2.49,
                 "confidence": "exact",
                 "url": "https://www.auchan.fr/p/riz",
+                "promo": False,
+                "promo_label": None,
             }
         ]
     }

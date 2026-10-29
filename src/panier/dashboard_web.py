@@ -169,30 +169,41 @@ def _files_card(files: dict[str, Any], history: dict[str, Any]) -> str:
     return _card("Données locales", f"<div class=\"stats\">{tiles}</div>{suffix}")
 
 
+def _promo_source(promo: dict[str, Any]) -> str:
+    label = promo.get("promo_label")
+    if label:
+        return str(label)
+    return "badge drive" if promo.get("reason") == "badge" else "baisse de prix"
+
+
 def _promos_card(since: Any, promos: list[dict[str, Any]]) -> str:
     if not promos:
         return _card(
-            f"Promos candidates ({html.escape(str(since or ''))})".strip(),
-            "<p class=\"empty\">Aucun candidat détecté</p>",
+            f"Promos ({html.escape(str(since or ''))})".strip(),
+            "<p class=\"empty\">Aucune promo détectée</p>",
         )
     rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(promo.get('canonical_name')))}</td>"
         f"<td>{html.escape(str(promo.get('store')))}</td>"
+        f"<td>{html.escape(str(promo.get('product') or ''))}</td>"
+        f"<td class=\"num\">{_euro(promo.get('unit_price'))}</td>"
         f"<td class=\"num\">{_euro(promo.get('last_price'))}</td>"
         f"<td class=\"num\">{_euro(promo.get('median_price'))}</td>"
+        f"<td>{html.escape(_promo_source(promo))}</td>"
         f"<td class=\"num {_delta_class(promo.get('delta_pct'))}\">"
         f"{_delta_text(promo.get('delta_pct'))}</td>"
         "</tr>"
         for promo in promos
     )
     table = (
-        "<table><thead><tr><th>Ingrédient</th><th>Store</th>"
-        "<th class=\"num\">Dernier</th><th class=\"num\">Médiane</th>"
-        "<th class=\"num\">Écart</th></tr></thead>"
+        "<table><thead><tr><th>Ingrédient</th><th>Store</th><th>Produit</th>"
+        "<th class=\"num\">€/kg</th><th class=\"num\">Dernier</th>"
+        "<th class=\"num\">Référence</th>"
+        "<th>Source</th><th class=\"num\">Écart</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
-    return _card(f"Promos candidates ({html.escape(str(since or ''))})", table)
+    return _card(f"Promos ({html.escape(str(since or ''))})", table)
 
 
 def _cache_card(cache_by_store: dict[str, Any]) -> str:

@@ -1488,28 +1488,41 @@ def history_promos(
             {
                 "candidates": [
                     {
-                        "canonical_name": trend.canonical_name,
-                        "store": trend.store,
-                        "last_price": trend.last_price,
-                        "median_price": round(trend.median_price, 4),
-                        "delta_pct": (
-                            round(trend.delta_pct, 2) if trend.delta_pct is not None else None
+                        "canonical_name": promo.canonical_name,
+                        "store": promo.store,
+                        "product": promo.product_title,
+                        "last_price": promo.last_price,
+                        "reference_price": (
+                            round(promo.reference_price, 4)
+                            if promo.reference_price is not None
+                            else None
                         ),
+                        "delta_pct": (
+                            round(promo.delta_pct, 2) if promo.delta_pct is not None else None
+                        ),
+                        "reason": promo.reason,
+                        "promo_label": promo.promo_label,
+                        "unit_price": promo.unit_price,
                     }
-                    for trend in candidates
+                    for promo in candidates
                 ]
             }
         )
         return
     if not candidates:
-        typer.echo("Aucun candidat promo détecté")
+        typer.echo("Aucune promo détectée")
         return
-    typer.echo("Candidats promo (prix courant < médiane historique):")
-    for trend in candidates:
-        delta = f"{trend.delta_pct:+.1f} %" if trend.delta_pct is not None else "n/a"
+    typer.echo("Promos détectées (badge drive ou baisse ≥ 10 % sur le même produit):")
+    for promo in candidates:
+        delta = f"{promo.delta_pct:+.1f} %" if promo.delta_pct is not None else "n/a"
+        if promo.reason == "badge":
+            detail = promo.promo_label or "badge drive"
+        else:
+            detail = f"vs médiane {promo.reference_price:.2f} € ({delta})"
+        per_kg = f" [{promo.unit_price:.2f} €/kg]" if promo.unit_price is not None else ""
         typer.echo(
-            f"- {trend.canonical_name} ({trend.store}): {trend.last_price:.2f} € "
-            f"vs médiane {trend.median_price:.2f} € ({delta})"
+            f"- {promo.canonical_name} ({promo.store}): {promo.product_title}{per_kg} "
+            f"à {promo.last_price:.2f} € — {detail}"
         )
 
 
@@ -4467,12 +4480,23 @@ def _dashboard_payload(data_dir: Path, promo_since: str) -> dict[str, Any]:
         "promos_since": promo_since,
         "promos": [
             {
-                "canonical_name": trend.canonical_name,
-                "store": trend.store,
-                "last_price": trend.last_price,
-                "median_price": round(trend.median_price, 4),
+                "canonical_name": promo.canonical_name,
+                "store": promo.store,
+                "product": promo.product_title,
+                "last_price": promo.last_price,
+                "median_price": (
+                    round(promo.reference_price, 4)
+                    if promo.reference_price is not None
+                    else None
+                ),
+                "delta_pct": (
+                    round(promo.delta_pct, 2) if promo.delta_pct is not None else None
+                ),
+                "reason": promo.reason,
+                "promo_label": promo.promo_label,
+                "unit_price": promo.unit_price,
             }
-            for trend in promos
+            for promo in promos
         ],
         "latest_cart_run": latest_run_id,
         "cache_by_store": {
@@ -4567,16 +4591,25 @@ def dashboard(
         + (f" (dernier {history['newest']})" if history["newest"] else "")
     )
 
-    typer.echo(f"\nPromos candidates (--since {promo_since}):")
+    typer.echo(f"\nPromos détectées (--since {promo_since}):")
     promos = payload["promos"]
     if not promos:
         typer.echo("  —")
     for promo in promos:
         delta_pct = promo.get("delta_pct")
         delta = f"{delta_pct:+.1f} %" if delta_pct is not None else "n/a"
+        if promo.get("reason") == "badge":
+            detail = promo.get("promo_label") or "badge drive"
+        else:
+            median = promo.get("median_price")
+            detail = (
+                f"vs médiane {median:.2f} € ({delta})" if median is not None else delta
+            )
+        unit_price = promo.get("unit_price")
+        per_kg = f" [{unit_price:.2f} €/kg]" if unit_price is not None else ""
         typer.echo(
             f"  - {promo['canonical_name']} ({promo['store']}): "
-            f"{promo['last_price']:.2f} € vs médiane {promo['median_price']:.2f} € ({delta})"
+            f"{promo.get('product') or ''}{per_kg} à {promo['last_price']:.2f} € — {detail}"
         )
 
     by_store = payload["cache_by_store"]

@@ -245,6 +245,11 @@ class StoreOffer(BaseModel):
     unit_price: PositiveFloat | None = None
     confidence: str = "exact"
     url: str | None = None
+    # Badge promo lu dans le DOM du drive (« -10% Club », « ICI PRIX MINI »).
+    # Le drive est la seule source fiable : une baisse entre deux collectes
+    # peut être un changement de produit, pas une promo.
+    promo: bool = False
+    promo_label: str | None = None
 
     @field_validator("item")
     @classmethod

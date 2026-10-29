@@ -180,18 +180,109 @@ def test_trend_median_falls_back_to_raw_without_mdd_volumetric(tmp_path: Path) -
 
 
 def test_promos_flags_current_price_below_median(tmp_path: Path) -> None:
-    _seed_history(tmp_path, prices=[3.0, 2.8, 3.2, 1.9])
+    """Baisse sur le MÊME produit : signalée."""
+    base = datetime.now(UTC) - timedelta(hours=5)
+    for index, price in enumerate([3.0, 2.8, 3.2, 1.9]):
+        record_offers(
+            tmp_path,
+            "leclerc",
+            [_offer("leclerc", "Emmental râpé Eco+ 200g", price)],
+            collected_at=base + timedelta(hours=index),
+        )
 
     result = RUNNER.invoke(app, ["history", "promos", "--since", "7d", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "emmental râpé (leclerc): 1.90 €" in result.output
+    assert "emmental râpé (leclerc)" in result.output
+    assert "1.90 €" in result.output
 
     none_run = RUNNER.invoke(
         app,
         ["history", "promos", "--since", "7d", "--data-dir", str(tmp_path / "vide")],
     )
-    assert "Aucun candidat promo" in none_run.output
+    assert "Aucune promo détectée" in none_run.output
+
+
+def test_promos_ignore_different_products_of_same_ingredient(tmp_path: Path) -> None:
+    """Verrou : comparer des références différentes ne fait pas une promo.
+
+    « Pâtes Eco+ 1 kg » à 0,88 € et « Penne Turini 500 g » à 0,55 € sont deux
+    produits distincts du même ingrédient ; l'ancien calcul par ingrédient
+    signalait le moins cher comme promo permanente.
+    """
+    base = datetime.now(UTC) - timedelta(hours=5)
+    entries = [
+        ("Pâtes Eco+ Spaghetti - 1kg", 0.88),
+        ("Pâtes Eco+ Coquillettes - 1kg", 0.89),
+        ("Pâtes Penne Regate Turini 500g", 0.55),
+    ]
+    for index, (product, price) in enumerate(entries):
+        record_offers(
+            tmp_path,
+            "leclerc",
+            [StoreOffer(store="leclerc", item="pates", product=product, price=price)],
+            collected_at=base + timedelta(hours=index),
+        )
+
+    from panier.history_store import promo_candidates
+
+    assert promo_candidates(tmp_path) == []
+
+
+def test_promos_detect_same_product_price_drop(tmp_path: Path) -> None:
+    """Une baisse sur un MÊME produit reste détectée."""
+    base = datetime.now(UTC) - timedelta(hours=5)
+    prices = [1.20, 1.20, 1.20, 0.99]
+    for index, price in enumerate(prices):
+        record_offers(
+            tmp_path,
+            "leclerc",
+            [
+                StoreOffer(
+                    store="leclerc",
+                    item="pates",
+                    product="Pâtes Penne Turini 500g",
+                    price=price,
+                )
+            ],
+            collected_at=base + timedelta(hours=index),
+        )
+
+    from panier.history_store import promo_candidates
+
+    promos = promo_candidates(tmp_path)
+    assert len(promos) == 1
+    assert promos[0].product_title == "Pâtes Penne Turini 500g"
+    assert promos[0].reason == "price_drop"
+    assert promos[0].last_price == 0.99
+    assert promos[0].reference_price == 1.20
+    assert promos[0].delta_pct is not None and promos[0].delta_pct < -10
+
+
+def test_promos_use_drive_badge_even_without_history(tmp_path: Path) -> None:
+    """Un badge affiché par le drive suffit, même sur une seule observation."""
+    record_offers(
+        tmp_path,
+        "carrefour",
+        [
+            StoreOffer(
+                store="carrefour",
+                item="tomates",
+                product="Tomates rondes en grappe vrac",
+                price=3.59,
+                promo=True,
+                promo_label="-10% Club",
+            )
+        ],
+    )
+
+    from panier.history_store import promo_candidates
+
+    promos = promo_candidates(tmp_path)
+    assert len(promos) == 1
+    assert promos[0].reason == "badge"
+    assert promos[0].promo_label == "-10% Club"
+    assert promos[0].reference_price is None
 
 
 def test_parse_since_formats() -> None:

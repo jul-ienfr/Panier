@@ -47,8 +47,8 @@ def test_render_html_escapes_and_uses_structured_layout() -> None:
     assert ">Préférences</h2>" in html
     assert ">Magasins</h2>" in html
     assert ">Données locales</h2>" in html
-    assert "Promos candidates (7d)" in html
-    assert "Aucun candidat détecté" in html
+    assert "Promos (7d)" in html
+    assert "Aucune promo détectée" in html
     assert 'class="chip' in html
     assert "active_household" not in html
     assert "Interface v2" in html
@@ -87,10 +87,22 @@ def test_render_html_shows_promos_table_and_store_chips() -> None:
                 {
                     "canonical_name": "emmental râpé",
                     "store": "leclerc",
+                    "product": "Emmental râpé Eco+ 200g",
                     "last_price": 1.9,
                     "median_price": 2.5,
                     "delta_pct": -24.0,
-                }
+                    "reason": "price_drop",
+                },
+                {
+                    "canonical_name": "tomates",
+                    "store": "carrefour",
+                    "product": "Tomates rondes en grappe vrac",
+                    "last_price": 3.59,
+                    "median_price": None,
+                    "delta_pct": None,
+                    "reason": "badge",
+                    "promo_label": "-10% Club",
+                },
             ],
             "promos_since": "7d",
             "cache_by_store": {
@@ -106,6 +118,9 @@ def test_render_html_shows_promos_table_and_store_chips() -> None:
     assert "-24.0 %" in html
     assert "1.90 €" in html
     assert "2.50 €" in html
+    assert "Emmental râpé Eco+ 200g" in html
+    assert "-10% Club" in html
+    assert "Tomates rondes en grappe vrac" in html
     assert "4321s" in html
     assert "74350" in html
     assert "80.00 €" in html

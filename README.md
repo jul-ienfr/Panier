@@ -247,8 +247,17 @@ Chaque collecte fraîche alimente `~/.panier/history.sqlite3` (append-only) :
 ```bash
 panier history show "emmental râpé" [--store leclerc] [--since 30d]
 panier history trend "emmental râpé"      # min/moyenne/médiane/dernier, variation %
-panier history promos --since 7d          # prix courant < médiane historique
+panier history promos --since 7d          # badge du drive ou baisse ≥ 10 %
 ```
+
+Deux sources de vérité, dans cet ordre :
+
+1. **Badge promo lu dans le DOM du drive** (`-15% Mardi PASS`, `ICI PRIX MINI`, `10 % cagnottés`). C'est la seule source fiable : le drive sait qu'il applique une offre, la collecte ne voit qu'un instantané.
+2. **Baisse ≥ 10 % sur un MÊME produit** par rapport à sa propre médiane historique. Le regroupement se fait sur `(ingrédient, magasin, libellé, prix au kilo)` : comparer deux références du même ingrédient (« Pâtes Eco+ 1 kg » à 0,88 € vs « Penne Turini 500 g » à 0,55 €) ne mesure pas une promotion mais un changement de produit, et le prix au kilo est indispensable puisque les drives réutilisent un même libellé pour plusieurs formats (Carrefour : « Haricots rouges » à 1,45 € et 0,69 €).
+
+Leclerc et Intermarché n'exposent aucun badge promo exploitable dans leur DOM : pour ces deux drives, seule la détection par baisse de prix fonctionne.
+
+Chaque collecte stocke aussi `promo` et `promo_label` sur l'offre ; une migration additive (`ALTER TABLE`) ajoute la colonne aux bases existantes sans perdre l'historique.
 
 Le bloc « Historique prix » affiché par `compare/plan/week` est strictement informatif (`--no-price-history` pour le taire) : il ne change jamais la recommandation.
 
@@ -302,7 +311,7 @@ panier dashboard                 # vue complète texte
 panier dashboard --format json   # même payload en JSON
 ```
 
-Foyer actif, préférences, magasins/budget, état des fichiers locaux, statistiques d'historique, promos candidates et dernier run panier.
+Foyer actif, préférences, magasins/budget, état des fichiers locaux, statistiques d'historique, promos détectées (badge drive ou baisse ≥ 10 %) et dernier run panier.
 
 ### Dashboard web (LAN)
 
