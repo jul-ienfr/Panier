@@ -464,3 +464,129 @@ def _write_recipe(tmp_path: Path) -> None:
 
 def test_price_history_payload_skips_unknown_items(tmp_path: Path) -> None:
     assert price_history_payload(tmp_path, ["inconnu"]) == {}
+
+
+def test_promo_label_that_is_a_detail_link_is_ignored(tmp_path: Path) -> None:
+    """Super U glisse « Afficher le prix 3,46 € /pers » dans son bloc promo."""
+    record_offers(
+        tmp_path,
+        "superu",
+        [
+            StoreOffer(
+                store="superu",
+                item="thon",
+                product="Samoussas au thon",
+                price=3.46,
+                promo=True,
+                promo_label="Afficher le prix 3,46 € /pers",
+            )
+        ],
+    )
+
+    from panier.history_store import promo_candidates
+
+    assert promo_candidates(tmp_path) == []
+
+
+def test_product_key_uses_the_reference_in_the_url() -> None:
+    """Deux EAN différents du même libellé sont deux produits distincts."""
+    from panier.history_store import HistoryPoint, _product_key
+
+    def _point(price: float, url: str) -> HistoryPoint:
+        return HistoryPoint(
+            id=1,
+            collected_at="2026-10-29T07:00:00+00:00",
+            store="carrefour",
+            canonical_name="thon",
+            product_title="Morceaux de Thon au Naturel SIMPL",
+            brand=None,
+            quantity=None,
+            unit=None,
+            price=price,
+            unit_price=None,
+            promo=False,
+            url=url,
+        )
+
+    small = _point(
+        0.99, "https://www.carrefour.fr/p/morceaux-de-thon-au-naturel-simpl-3560071000035"
+    )
+    large = _point(
+        1.95, "https://www.carrefour.fr/p/morceaux-de-thon-au-naturel-simpl-3560071084158"
+    )
+    assert _product_key(small) != _product_key(large)
+    assert _product_key(small) == "ref:3560071000035"
+
+
+def test_product_key_ignores_store_numbers_in_leclerc_search_urls() -> None:
+    """L'URL Leclerc ne contient que des numéros de magasin, pas de produit."""
+    from panier.history_store import HistoryPoint, _product_key
+
+    def _point(product: str, unit_price: float) -> HistoryPoint:
+        return HistoryPoint(
+            id=1,
+            collected_at="2026-10-29T07:00:00+00:00",
+            store="leclerc",
+            canonical_name="pates",
+            product_title=product,
+            brand=None,
+            quantity=None,
+            unit=None,
+            price=unit_price,
+            unit_price=unit_price,
+            promo=False,
+            url=(
+                "https://fd2-courses.leclercdrive.fr/magasin-027411-001261-ville-"
+                "la-grand-annemasse-/recherche.aspx?TexteRecherche=pates&tri=2#"
+            ),
+        )
+
+    spaghetti = _point("Pâtes Eco+ Spaghetti - 1kg", 0.88)
+    torsades = _point("Pâtes Torsades Turini 500g", 1.18)
+    assert _product_key(spaghetti) != _product_key(torsades)
+
+
+def test_price_history_payload_compares_the_recommended_product(tmp_path: Path) -> None:
+    """Le bloc informatif ne compare pas deux formats du même ingrédient."""
+    now = datetime.now(UTC) - timedelta(hours=3)
+    record_offers(
+        tmp_path,
+        "carrefour",
+        [
+            StoreOffer(
+                store="carrefour",
+                item="thon",
+                product="Morceaux de Thon au Naturel SIMPL",
+                price=1.95,
+                url="https://www.carrefour.fr/p/thon-simpl-3560071084158",
+            )
+        ],
+        collected_at=now,
+    )
+    record_offers(
+        tmp_path,
+        "carrefour",
+        [
+            StoreOffer(
+                store="carrefour",
+                item="thon",
+                product="Morceaux de Thon au Naturel SIMPL",
+                price=0.99,
+                url="https://www.carrefour.fr/p/thon-simpl-3560071000035",
+            )
+        ],
+        collected_at=now + timedelta(hours=1),
+    )
+    recommended = StoreOffer(
+        store="carrefour",
+        item="thon",
+        product="Morceaux de Thon au Naturel SIMPL",
+        price=1.95,
+        url="https://www.carrefour.fr/p/thon-simpl-3560071084158",
+    )
+
+    payload = price_history_payload(tmp_path, ["thon"], offers={"thon": recommended})
+
+    assert payload["thon"]["last_price"] == 1.95
+    assert payload["thon"]["delta_pct"] == 0.0
+    assert payload["thon"]["is_promo_candidate"] is False

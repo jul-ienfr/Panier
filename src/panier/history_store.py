@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from panier.models import StoreOffer, normalize_name
 
@@ -342,18 +343,68 @@ class PromoSignal:
     unit_price: float | None = None
 
 
+def _product_ref(url: str | None) -> str | None:
+    """Référence produit lue dans l'URL de la fiche drive.
+
+    C'est la seule identité fiable : Carrefour expose l'EAN en fin de slug
+    (`/p/courgettes-3276558381121`) et Super U l'id de fiche (`/459339.html`),
+    alors que le libellé est partagé par plusieurs références. Renvoie None
+    Chez Leclerc l'URL est celle de la recherche
+    (`/magasin-027411-001261-.../recherche.aspx`) : les chiffres du chemin
+    sont des numéros de magasin, pas des produits, d'où le dernier segment
+    uniquement — sinon tous les articles Leclerc partageaient une identité.
+    """
+    if not url:
+        return None
+    segments = [part for part in urlparse(url).path.split("/") if part]
+    if not segments:
+        return None
+    match = re.search(r"(\d{5,14})", segments[-1])
+    if match is None:
+        return None
+    return match.group(1)
+
+
 def _product_key(point: HistoryPoint) -> str:
-    """Identité d'un produit : libellé + prix au kilo.
+    """Identité d'un produit : référence de fiche, sinon libellé + prix au kilo.
 
     Les drives réutilisent le même libellé pour plusieurs formats : chez
     Carrefour, « SIMPL Riz Long Etuvé SIMPL » existe à 1,35 € (1,35 €/kg) et à
     0,89 € (1,78 €/kg), et « MUTTI Pulpe de tomate » à 1,09 / 2,55 / 2,95 €.
-    Sans le prix au kilo, ces références se mélangent et la moins chère passe
-    pour une promo permanente.
+    Quand l'URL porte une référence elle tranche seule ; sinon le prix au kilo
+    est le seul discriminant disponible.
     """
+    ref = _product_ref(point.url)
+    if ref is not None:
+        return f"ref:{ref}"
     unit_price = point.unit_price
     price_part = "" if unit_price is None else round(unit_price, 3)
     return f"{normalize_name(point.product_title)}|{price_part}"
+
+
+_NOT_A_PROMO_LABEL = re.compile(
+    r"^(afficher|voir|d[eé]tail|en savoir|plus d|ajouter)"
+    r"|^\d+([.,]\d+)?\s*€"
+    r"|/\s*pers",
+    re.IGNORECASE,
+)
+_PROMO_LABEL_HINT = re.compile(
+    r"promo|discount|remise|reduc|%|choc|mini|euro|€|cagnott|club|anti.?gaspi",
+    re.IGNORECASE,
+)
+
+
+def _valid_promo_label(label: str | None) -> bool:
+    """Filtre les libellés de badge qui ne sont pas des promos.
+
+    Super U place « Afficher le prix 3,46 € /pers » dans le même bloc que ses
+    vrais badges : sans ce filtre, un simple lien de détail devenait une promo.
+    """
+    if not label:
+        return False
+    if len(label) > 60 or not _PROMO_LABEL_HINT.search(label):
+        return False
+    return _NOT_A_PROMO_LABEL.search(label) is None
 
 
 def _promo_signal(points: list[HistoryPoint]) -> PromoSignal | None:
@@ -366,7 +417,10 @@ def _promo_signal(points: list[HistoryPoint]) -> PromoSignal | None:
     delta_pct = None
     if reference and reference > 0:
         delta_pct = (last.price - reference) / reference * 100
-    badge = last.promo or bool(last.promo_label)
+    label = last.promo_label if _valid_promo_label(last.promo_label) else None
+    # `promo` est posé par la collecte dès qu'un libellé non vide est trouvé :
+    # si ce libellé est en fait un lien de détail, le drapeau ne prouve rien.
+    badge = label is not None or (last.promo and not last.promo_label)
     drop = delta_pct is not None and delta_pct <= -MIN_PROMO_DROP_PCT
     if not badge and not drop:
         return None
@@ -379,20 +433,13 @@ def _promo_signal(points: list[HistoryPoint]) -> PromoSignal | None:
         delta_pct=delta_pct,
         observations=len(prices),
         last_collected_at=last.collected_at,
-        promo_label=last.promo_label,
+        promo_label=label,
         reason="badge" if badge else "price_drop",
         unit_price=last.unit_price,
     )
 
 
-def trend_for_item(
-    data_dir: Path,
-    canonical_name: str,
-    *,
-    store: str | None = None,
-    since: datetime | None = None,
-) -> PriceTrend | None:
-    points = offers_for_item(data_dir, canonical_name, store=store, since=since)
+def _trend_from_points(points: list[HistoryPoint]) -> PriceTrend | None:
     if not points:
         return None
     prices = [point.price for point in points]
@@ -414,6 +461,9 @@ def trend_for_item(
         median = median_raw
         price_basis = "raw"
     delta_pct = ((last.price - mean) / mean * 100) if mean else None
+    # Même seuil que `history promos` : « dernier < médiane » signalait un
+    # candidat promo pour un écart d'un centime, ce qui contredisait la liste.
+    is_promo_candidate = delta_pct is not None and delta_pct <= -MIN_PROMO_DROP_PCT
     return PriceTrend(
         canonical_name=last.canonical_name,
         store=last.store,
@@ -424,11 +474,22 @@ def trend_for_item(
         last_price=last.price,
         last_collected_at=last.collected_at,
         delta_pct=delta_pct,
-        is_promo_candidate=last.price < median,
+        is_promo_candidate=is_promo_candidate,
         price_basis=price_basis,
         median_price_raw=median_raw,
         normalized_observations=len(normalized),
     )
+
+
+def trend_for_item(
+    data_dir: Path,
+    canonical_name: str,
+    *,
+    store: str | None = None,
+    since: datetime | None = None,
+) -> PriceTrend | None:
+    points = offers_for_item(data_dir, canonical_name, store=store, since=since)
+    return _trend_from_points(points)
 
 
 def promo_candidates(
@@ -543,21 +604,42 @@ def price_history_payload(
     canonical_names: list[str],
     *,
     now: datetime | None = None,
+    offers: dict[str, StoreOffer] | None = None,
 ) -> dict[str, dict]:
     """Bloc informatif price_history pour une liste de noms canoniques.
 
-    Les statistiques sont calculées sur le store du dernier point connu de
-    l'ingrédient : comparer un prix au median d'un autre drive serait trompeur.
+    Les statistiques sont calculées sur le produit réellement recommandé quand
+    il est fourni : sans lui, le bloc comparait le prix du produit recommandé
+    (courgettes en rondelles à 1,25 €) à la moyenne de toutes les références de
+    l'ingrédient (2,59 €) et affichait un écart qui ne voulait rien dire.
     """
     block: dict[str, dict] = {}
     for name in sorted(set(canonical_names)):
         points = offers_for_item(data_dir, name)
         if not points:
             continue
+        target = offers.get(name) if offers else None
+        if target is not None:
+            target_ref = _product_ref(target.url)
+            target_title = normalize_name(target.product)
+            target_unit = target.unit_price
+            wanted = (
+                f"ref:{target_ref}"
+                if target_ref is not None
+                else f"{target_title}|{'' if target_unit is None else round(target_unit, 3)}"
+            )
+            same_product = [
+                point
+                for point in points
+                if point.store == target.store and _product_key(point) == wanted
+            ]
+            if same_product:
+                points = same_product
         # Dernier point connu ; à collecte simultanée (horodatage à la seconde),
         # l'id d'insertion tranche de façon déterministe (ordre d'agrégation).
         last = max(points, key=lambda point: (point.collected_at, point.id))
-        trend = trend_for_item(data_dir, name, store=last.store)
+        points = [point for point in points if point.store == last.store]
+        trend = _trend_from_points(points)
         if trend is None:
             continue
         block[name] = {

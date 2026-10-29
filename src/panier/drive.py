@@ -261,12 +261,19 @@ _PRODUCT_EXTRACTION_JS = r"""
       '.product-promotion-banner', '[class*=promo i]', '[class*=discount i]',
       '[class*=remise i]', '[class*=reduction i]', '[class*=prix-choc i]'
     ];
+    /* Super U affiche « Afficher le prix 3,46 € /pers » dans un bloc qui
+       contient un prix : ce n'est pas une promo mais un lien de détail. */
+    const isActionOrPrice = (label) =>
+      /^(afficher|voir|d[eé]tail|en savoir|plus d|ajouter)/i.test(label)
+      || /^\d+([.,]\d+)?\s*€/.test(label)
+      || /\/\s*pers/i.test(label);
     for (const selector of prioritized) {
       for (const found of node.querySelectorAll(selector)) {
         const label = normalizedText(found);
         if (
           label
           && label.length <= 60
+          && !isActionOrPrice(label)
           && /promo|discount|remise|reduc|%|choc|mini|euro|€|cagnott|club|anti.?gaspi/i.test(label)
         ) {
           return label;
@@ -784,7 +791,7 @@ def _offer_from_browser_item(
         unit_price=unit_price,
         confidence="medium",
         url=url,
-        promo=bool(raw.get("promo")) or bool(promo_label),
+        promo=bool(promo_label),
         promo_label=promo_label or None,
     )
     scored = score_offer(item, candidate)

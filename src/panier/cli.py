@@ -986,7 +986,9 @@ def echo_price_history_block(
     if not enabled or not history_db_path(data_dir).exists():
         return
     block = price_history_payload(
-        data_dir, [offer.item for offer in recommendation_items.values()]
+        data_dir,
+        [offer.item for offer in recommendation_items.values()],
+        offers=recommendation_items,
     )
     if not block:
         return
