@@ -916,13 +916,25 @@ def _echo_cart_status(store: str, status: dict) -> None:
 
 
 def _echo_cart_sync_diff(store: str, diff: dict) -> None:
-    summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
+    raw_summary = diff.get("summary")
+    summary: dict = raw_summary if isinstance(raw_summary, dict) else {}
     typer.echo(f"Diff sync panier {store} (dry-run).")
     typer.echo(f"  À garder: {summary.get('unchanged_count', 0)}")
     typer.echo(f"  À ajouter: {summary.get('to_add_count', 0)}")
     typer.echo(f"  À retirer: {summary.get('to_remove_count', 0)}")
     typer.echo(f"  Quantités à corriger: {summary.get('to_update_quantity_count', 0)}")
     typer.echo(f"  Ambigus: {summary.get('ambiguous_count', 0)}")
+    if diff.get("safe_to_apply"):
+        typer.echo("  Application sûre: oui")
+    else:
+        typer.echo("  Application sûre: non")
+        raw_errors = diff.get("errors")
+        errors: list = raw_errors if isinstance(raw_errors, list) else []
+        blockers = [str(err) for err in errors if err]
+        if blockers:
+            typer.echo(f"  Blocage: {', '.join(blockers)}")
+        if summary.get("ambiguous_count", 0):
+            typer.echo("  Résolution requise: correspondances ambiguës à confirmer")
 
 
 def _store_worker(

@@ -11,12 +11,23 @@ Usage :
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "mypy-baseline.txt"
+
+LINE_RE = re.compile(r"^(?P<file>[^:]+):\d+: (?P<message>error: .*)$")
+
+
+def normalize(line: str) -> str:
+    """Ignore les numéros de ligne: un décalage ne doit pas créer d'erreur « nouvelle »."""
+    match = LINE_RE.match(line.strip())
+    if match:
+        return f"{match.group('file')}: {match.group('message')}"
+    return line.strip()
 
 
 def current_errors() -> list[str]:
@@ -27,16 +38,23 @@ def current_errors() -> list[str]:
         text=True,
         check=False,
     )
+    return [normalize(line) for line in completed.stdout.splitlines() if ": error:" in line]
+
+
+def read_baseline() -> list[str]:
+    if not BASELINE.exists():
+        return []
     return [
-        line.strip()
-        for line in completed.stdout.splitlines()
-        if ": error:" in line
+        normalize(line)
+        for line in BASELINE.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
 
 
 def main(argv: list[str]) -> int:
-    errors = current_errors()
+    errors = read_baseline() if "--update" not in argv else []
     if "--update" in argv:
+        errors = current_errors()
         BASELINE.write_text(
             "\n".join(sorted(errors)) + ("\n" if errors else ""),
             encoding="utf-8",
@@ -44,15 +62,10 @@ def main(argv: list[str]) -> int:
         print(f"Baseline mise à jour: {len(errors)} erreurs tolérées.")
         return 0
 
-    baseline: set[str] = set()
-    if BASELINE.exists():
-        baseline = {
-            line.strip()
-            for line in BASELINE.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    new_errors = sorted(set(errors) - baseline)
-    resolved = sorted(baseline - set(errors))
+    current = current_errors()
+    baseline = read_baseline()
+    new_errors = sorted(set(current) - set(baseline))
+    resolved = sorted(set(baseline) - set(current))
 
     for line in resolved:
         print(f"Résorbé (retirer du baseline): {line}")
@@ -63,9 +76,15 @@ def main(argv: list[str]) -> int:
         print("Corrige ces erreurs, ou étends volontairement mypy-baseline.txt")
         print("(python scripts/check_mypy.py --update) après relecture.")
         return 1
+    if resolved:
+        print(
+            "Des erreurs tolérées ont été résorbées: régénère le baseline "
+            "(python scripts/check_mypy.py --update) pour le resserrer."
+        )
+        return 0
     print(
         f"mypy OK ({len(baseline)} erreur(s) historique(s) tolérée(s), "
-        f"{len(errors)} actuellement)."
+        f"{len(current)} actuellement)."
     )
     return 0
 

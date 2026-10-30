@@ -593,7 +593,7 @@ def cart_sync_diff(store: str, desired: list[CartLine], status: dict) -> dict:
         },
         "operations": operations,
         "requires_confirmation": True,
-        "safe_to_apply": False if blocked or ambiguous else False,
+        "safe_to_apply": not blocked and not ambiguous,
         "errors": [status.get("blocked_by")] if blocked else [],
     }
 

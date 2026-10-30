@@ -2664,6 +2664,37 @@ def test_cart_sync_diff_classifies_keep_add_remove_and_quantity() -> None:
         "add",
         "remove",
     ]
+    assert diff["safe_to_apply"] is True
+    assert diff["ok"] is True
+
+
+def test_cart_sync_diff_marks_ambiguous_match_unsafe() -> None:
+    desired = [CartLine(store="auchan", item="riz", product="Riz basmati", quantity=1)]
+    status = {
+        "actual_lines": [{"title": "Riz long grain", "quantity": 1}],
+        "expected_matches": [
+            {
+                "expected_index": 0,
+                "matched": True,
+                "confidence": "low",
+                "actual_index": 0,
+                "actual_quantity": 1,
+            }
+        ],
+    }
+    diff = cart_sync_diff("auchan", desired, status)
+    assert diff["summary"]["ambiguous_count"] == 1
+    assert diff["safe_to_apply"] is False
+    assert diff["requires_confirmation"] is True
+
+
+def test_cart_sync_diff_marks_blocked_status_unsafe() -> None:
+    desired = [CartLine(store="auchan", item="riz", product="Riz basmati", quantity=1)]
+    status = {"blocked_by": "captcha", "actual_lines": [], "expected_matches": []}
+    diff = cart_sync_diff("auchan", desired, status)
+    assert diff["ok"] is False
+    assert diff["safe_to_apply"] is False
+    assert diff["errors"] == ["captcha"]
 
 
 def test_plan_add_to_cart_persists_cart_run(tmp_path: Path, monkeypatch) -> None:
@@ -2816,6 +2847,61 @@ def test_cart_sync_prints_read_only_diff(tmp_path: Path, monkeypatch) -> None:
     assert "État panier auchan (read-only)." in result.output
     assert "Diff sync panier auchan (dry-run)." in result.output
     assert "À ajouter: 1" in result.output
+    assert "Application sûre: oui" in result.output
+
+
+def test_cart_sync_cli_flags_blocked_and_ambiguous(tmp_path: Path, monkeypatch) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "latest.txt").write_text("cart-sync-blocked\n", encoding="utf-8")
+    (runs / "cart-sync-blocked.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "cart-sync-blocked",
+                "action": "add",
+                "dry_run": True,
+                "created_at": "now",
+                "grouped_lines": {
+                    "auchan": [
+                        {
+                            "store": "auchan",
+                            "item": "riz",
+                            "product": "Riz Auchan",
+                            "quantity": 1,
+                            "status": "offer_collected",
+                        }
+                    ]
+                },
+                "results": {},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_status(store, lines, *, profile, browser_command):
+        return {
+            "url": "https://www.auchan.fr/panier",
+            "blocked_by": "captcha",
+            "actual_lines": [{"title": "Riz long grain", "quantity": 1}],
+            "expected_matches": [
+                {
+                    "expected_index": 0,
+                    "matched": True,
+                    "confidence": "low",
+                    "actual_index": 0,
+                    "actual_quantity": 1,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(cli, "run_cart_status_for_store", fake_status)
+    result = CliRunner().invoke(app, ["cart", "sync", "--data-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "Application sûre: non" in result.output
+    assert "Blocage: captcha" in result.output
+    assert "correspondances ambiguës" in result.output
 
 
 def test_doctor_status_reports_json_summary(tmp_path: Path) -> None:
