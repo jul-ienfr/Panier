@@ -5,7 +5,10 @@
 1. **Parallélisation entre stores** (`panier/collector.py`) : un worker
    ThreadPoolExecutor par store, dédupliqué (jamais deux workers sur le même
    store/profil). Agrégation dans l'ordre demandé ; échec/timeout d'un store
-   jamais propagé aux autres. Timeout global du cycle (défaut 300s,
+   jamais propagé aux autres. Une collecte qui ne ramène **0 offre** est
+   marquée `empty` (et non `ok`) : avertissement explicite et store compté
+   en échec, pour ne pas confondre page vide/consentement avec un succès.
+   Timeout global du cycle (défaut 300s,
    `PANIER_COLLECT_TIMEOUT_SECONDS` / `--collect-timeout-seconds`).
 2. **Cache offres TTL** (`panier/offers_cache.py`) :
    `<data_dir>/cache/offers/<store>-<hash-liste>.yaml`, TTL défaut 6h

@@ -275,6 +275,35 @@ def test_failed_store_does_not_break_the_others() -> None:
     assert [offer.store for offer in offers] == ["ok"]
 
 
+def test_empty_store_result_is_flagged_as_empty_status() -> None:
+    def worker(drive: str) -> list[StoreOffer]:
+        if drive == "vide":
+            return []
+        return [StoreOffer(store=drive, item="riz", product=f"Riz {drive}", price=1.0)]
+
+    offers, statuses, errors = collect_offers_parallel(["vide", "ok"], worker)
+
+    assert statuses == {"vide": "empty", "ok": "ok"}
+    assert errors == {}
+    assert [offer.store for offer in offers] == ["ok"]
+
+
+def test_empty_collection_counts_as_failure_with_warning(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "collect_drive_offers", lambda *args, **kwargs: [])
+
+    offers, had_failure = cli.collect_offers_for_drives(
+        [cli.ShoppingItem(name="riz", quantity=100, unit="g")],
+        ["leclerc"],
+        profile="default",
+        browser_command=None,
+        max_results=5,
+    )
+
+    assert offers == []
+    assert had_failure is True
+    assert "0 offre extraite" in capsys.readouterr().err
+
+
 def test_resolve_collect_timeout_seconds_env_override(monkeypatch) -> None:
     monkeypatch.delenv("PANIER_COLLECT_TIMEOUT_SECONDS", raising=False)
     assert resolve_collect_timeout_seconds() > 0

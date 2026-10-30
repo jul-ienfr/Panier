@@ -20,7 +20,7 @@ from panier.models import normalize_name
 DEFAULT_COLLECT_TIMEOUT_SECONDS = 300.0
 COLLECT_TIMEOUT_ENV_VAR = "PANIER_COLLECT_TIMEOUT_SECONDS"
 
-CollectStatus = Literal["ok", "failed", "timeout"]
+CollectStatus = Literal["ok", "empty", "failed", "timeout"]
 
 StoreWorker = Callable[[str], list]
 
@@ -99,9 +99,7 @@ def collect_offers_parallel(
         return [], statuses, errors
 
     executor = ThreadPoolExecutor(max_workers=len(unique_drives), thread_name_prefix="panier")
-    futures: dict[str, Future] = {
-        drive: executor.submit(worker, drive) for drive in unique_drives
-    }
+    futures: dict[str, Future] = {drive: executor.submit(worker, drive) for drive in unique_drives}
     try:
         _, pending = wait(list(futures.values()), timeout=timeout)
         timed_out = {id(future) for future in pending}
@@ -114,8 +112,9 @@ def collect_offers_parallel(
                 statuses[drive] = "failed"
                 errors[drive] = str(error)
                 continue
-            statuses[drive] = "ok"
-            offers_by_drive[drive] = list(future.result() or [])
+            offers = list(future.result() or [])
+            offers_by_drive[drive] = offers
+            statuses[drive] = "ok" if offers else "empty"
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
