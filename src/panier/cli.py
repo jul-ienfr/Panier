@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
+import io
 import json
 from collections.abc import Callable
 from dataclasses import asdict as _dc_asdict
@@ -135,6 +137,14 @@ from panier.substitutions import (
     save_substitutions,
     substitute_offers_for_requested_items,
     substitutions_path,
+)
+from panier.zone import (
+    DEFAULT_RADIUS_KM,
+    MAX_RADIUS_KM,
+    DriveCandidate,
+    ZoneError,
+    drive_zone,
+    toggle_store,
 )
 
 app = typer.Typer(
@@ -3051,6 +3061,143 @@ def shopping_from_recipe(
     )
 
 
+def _split_stores(values: list[str] | None) -> list[str]:
+    """Découpe les valeurs répétables et les listes séparées par des virgules."""
+    out: list[str] = []
+    for value in values or []:
+        for part in str(value).split(","):
+            cleaned = " ".join(part.split())
+            if cleaned:
+                out.append(cleaned)
+    return out
+
+
+def _apply_store_toggles(
+    data_dir: Path,
+    household: HouseholdProfile | None,
+    *,
+    enable: list[str] | None,
+    disable: list[str] | None,
+) -> HouseholdProfile | None:
+    """Applique les bascules d'enseignes au foyer actif et le persiste."""
+    if not enable and not disable:
+        return household
+    if household is None:
+        raise typer.BadParameter("aucun foyer actif : créez-en un avec `panier profile create`")
+    updated = household
+    for store in _split_stores(enable):
+        updated = toggle_store(updated, store, enabled=True)
+    for store in _split_stores(disable):
+        updated = toggle_store(updated, store, enabled=False)
+    save_household(data_dir, updated)
+    return updated
+
+
+@drive_app.command("select")
+def drive_select(
+    enable: Annotated[
+        list[str] | None,
+        typer.Option("--enable", help="Enseigne à activer dans le foyer (répétable)"),
+    ] = None,
+    disable: Annotated[
+        list[str] | None,
+        typer.Option("--disable", help="Enseigne à désactiver dans le foyer (répétable)"),
+    ] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    """Active/désactive des enseignes sans requête géographique."""
+    household = load_active_household(data_dir)
+    household = _apply_store_toggles(data_dir, household, enable=enable, disable=disable)
+    enabled = sorted(household.enabled_stores()) if household is not None else []
+    disabled = sorted(household.disabled_stores()) if household is not None else []
+    if normalize_output_format(output_format) == "json":
+        echo_json(
+            {
+                "household": household.name if household is not None else None,
+                "enabled_stores": enabled,
+                "disabled_stores": disabled,
+            }
+        )
+        return
+    if household is None:
+        typer.echo("Aucun foyer actif : aucune sélection à afficher.")
+        return
+    typer.echo(f"Foyer: {household.name}")
+    typer.echo(f"Actives: {', '.join(enabled) if enabled else 'aucune'}")
+    typer.echo(f"Désactivées: {', '.join(disabled) if disabled else 'aucune'}")
+
+
+@drive_app.command("zone")
+def drive_zone_command(
+    query: Annotated[str, typer.Argument(help="Code postal ou ville (ex. 83440, Montauroux)")],
+    radius: Annotated[
+        float,
+        typer.Option("--radius", min=0.5, max=MAX_RADIUS_KM, help="Rayon de recherche en km"),
+    ] = DEFAULT_RADIUS_KM,
+    enable: Annotated[
+        list[str] | None,
+        typer.Option("--enable", help="Enseigne à activer dans le foyer (répétable)"),
+    ] = None,
+    disable: Annotated[
+        list[str] | None,
+        typer.Option("--disable", help="Enseigne à désactiver dans le foyer (répétable)"),
+    ] = None,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    household = _apply_store_toggles(
+        data_dir,
+        load_active_household(data_dir),
+        enable=enable,
+        disable=disable,
+    )
+    try:
+        zone = drive_zone(query, radius_km=radius, household=household)
+    except ZoneError as exc:
+        typer.echo(f"Zone indisponible: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if normalize_output_format(output_format) == "json":
+        payload = zone.as_dict()
+        payload["household"] = household.name if household is not None else None
+        echo_json(payload)
+        return
+    typer.echo(f"Zone: {zone.location.label} — rayon {zone.radius_km:g} km")
+    if not zone.candidates:
+        typer.echo("Aucun magasin trouvé dans ce rayon.")
+        return
+    typer.echo("")
+    for candidate in zone.candidates:
+        state = _zone_state_label(candidate)
+        store = candidate.store or "—"
+        address = f" — {candidate.address}" if candidate.address else ""
+        typer.echo(
+            f"{candidate.distance_km:5.1f} km  {store:12} {candidate.name}{address}  [{state}]"
+        )
+    selected = [c.store for c in zone.candidates if c.selected and c.store]
+    typer.echo("")
+    if zone.suggested_stores:
+        typer.echo(f"Suggérés: {', '.join(zone.suggested_stores)}")
+    typer.echo(f"Actives: {', '.join(selected) if selected else 'aucune'}")
+    if household is None:
+        typer.echo("Aucun foyer actif : la sélection n'est pas persistée.")
+    else:
+        typer.echo(
+            "Activer/désactiver : panier drive zone <zone> --enable <enseigne> "
+            "--disable <enseigne>"
+        )
+
+
+def _zone_state_label(candidate: DriveCandidate) -> str:
+    if candidate.enabled is True:
+        return "active"
+    if candidate.enabled is False:
+        return "désactivée"
+    if candidate.collectable:
+        return "disponible"
+    return "hors panier"
+
+
 @drive_app.command("plan")
 def drive_plan(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [{name, quantity, unit}]")],
@@ -3166,10 +3313,129 @@ def drive_pick(
         )
 
 
+def _drives_for_zone(data_dir: Path, query: str, radius_km: float) -> list[str]:
+    """Drives à collecter pour une zone : sélection du foyer, sinon suggestion.
+
+    La sélection manuelle prime toujours : si le foyer a activé des enseignes,
+    seules celles présentes dans le rayon sont collectées. Sans activation
+    explicite, on retombe sur la présélection automatique (les drives
+    collectables les plus proches).
+    """
+    household = load_active_household(data_dir)
+    zone_result = drive_zone(query, radius_km=radius_km, household=household)
+    if household is not None:
+        enabled = household.enabled_stores()
+        if enabled:
+            chosen = [c.store for c in zone_result.candidates if c.store in enabled]
+            if chosen:
+                return chosen
+    return list(zone_result.suggested_stores)
+
+
+def _resolve_collect_drives(
+    collect: str | None,
+    zone_query: str | None,
+    radius_km: float,
+    data_dir: Path,
+) -> list[str]:
+    """Drives à collecter depuis `--collect` ou depuis `--zone` (exclusif)."""
+    if zone_query is not None:
+        return _drives_for_zone(data_dir, zone_query, radius_km)
+    if collect:
+        return [drive.strip() for drive in collect.split(",") if drive.strip()]
+    return []
+
+
+def _collect_zone_drives(
+    *,
+    items: list[ShoppingItem],
+    zone_query: str,
+    radius_km: float,
+    profile: str,
+    browser_command: str | None,
+    max_results: int,
+    update_cache: bool,
+    data_dir: Path,
+    output: Path | None,
+    json_output: bool,
+) -> None:
+    """Collecte un panier sur les drives actifs autour d'une zone.
+
+    Les statuts de collecte (cache, échecs) sont écrits sur stderr en mode JSON
+    pour ne pas corrompre le document machine.
+    """
+    try:
+        drives = _drives_for_zone(data_dir, zone_query, radius_km)
+    except ZoneError as exc:
+        typer.echo(f"Zone indisponible: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not drives:
+        typer.echo("Aucun drive collectable dans ce rayon.", err=True)
+        raise typer.Exit(1)
+    if not json_output:
+        typer.echo(f"Drives collectés: {', '.join(drives)}")
+    sink = io.StringIO()
+    buffer = contextlib.redirect_stdout(sink) if json_output else contextlib.nullcontext()
+    with buffer:
+        offers, had_failure, cache_report = collect_offers_with_cache(
+            items,
+            drives,
+            profile=profile,
+            browser_command=browser_command,
+            max_results=max_results,
+            catalog=load_catalog(data_dir),
+            data_dir=data_dir,
+        )
+    if json_output:
+        statuses = sink.getvalue().strip()
+        if statuses:
+            typer.echo(statuses, err=True)
+    if update_cache:
+        add_offers_to_cache(data_dir, offers)
+        if not json_output:
+            typer.echo(f"Cache prix mis à jour: {price_cache_path(data_dir)}")
+    for drive in drives:
+        collected = [offer for offer in offers if normalize_name(offer.store) == drive]
+        if collected:
+            _record_history(data_dir, drive, collected)
+    payload = {
+        "zone": zone_query,
+        "radius_km": radius_km,
+        "drives": drives,
+        "offers": [offer.model_dump(mode="json") for offer in offers],
+        "count": len(offers),
+        "cache": [{"store": store, **info} for store, info in sorted(cache_report.items())],
+        "had_failure": had_failure,
+        "output": str(output) if output else None,
+    }
+    if json_output:
+        echo_json(payload)
+        return
+    if had_failure:
+        typer.echo("Collecte partielle: au moins un drive a échoué.", err=True)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            yaml.safe_dump({"offers": payload["offers"]}, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        typer.echo(f"Offres collectées: {len(offers)} -> {output}")
+        return
+    typer.echo(yaml.safe_dump({"offers": payload["offers"]}, allow_unicode=True, sort_keys=False))
+
+
 @drive_app.command("collect")
 def drive_collect(
     shopping_list: Annotated[Path, typer.Argument(help="YAML: items: [...]")],
     drive: Annotated[str, typer.Option("--drive", help="Nom du drive cible")] = "leclerc",
+    zone: Annotated[
+        str | None,
+        typer.Option("--zone", help="Code postal ou ville : collecte les drives du rayon"),
+    ] = None,
+    radius: Annotated[
+        float,
+        typer.Option("--radius", min=0.5, max=MAX_RADIUS_KM, help="Rayon de la zone en km"),
+    ] = DEFAULT_RADIUS_KM,
     profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
     site: Annotated[str | None, typer.Option("--site", help="Site Managed Browser")] = None,
     browser_command: Annotated[
@@ -3186,6 +3452,20 @@ def drive_collect(
 ) -> None:
     _json_collect = normalize_output_format(output_format) == "json"
     items = read_shopping_items(shopping_list)
+    if zone is not None:
+        _collect_zone_drives(
+            items=items,
+            zone_query=zone,
+            radius_km=radius,
+            profile=profile,
+            browser_command=browser_command,
+            max_results=max_results,
+            update_cache=update_cache,
+            data_dir=data_dir,
+            output=output,
+            json_output=normalize_output_format(output_format) == "json",
+        )
+        return
     resolved_profile = managed_browser_profile_for_drive(profile, site or drive)
     catalog = load_catalog(data_dir)
     browser = ManagedBrowserClient(
@@ -3722,6 +4002,14 @@ def plan(
         Path | None,
         typer.Option("--collect-output", help="Sauvegarder les offres collectées"),
     ] = None,
+    zone: Annotated[
+        str | None,
+        typer.Option("--zone", help="Code postal ou ville : collecte les drives actifs du rayon"),
+    ] = None,
+    radius: Annotated[
+        float,
+        typer.Option("--radius", min=0.5, max=MAX_RADIUS_KM, help="Rayon de la zone en km"),
+    ] = DEFAULT_RADIUS_KM,
     profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
     browser_command: Annotated[
         str | None,
@@ -3871,10 +4159,11 @@ def plan(
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
     cache_report: dict[str, dict] = {}
-    if collect:
+    collect_drives = _resolve_collect_drives(collect, zone, radius, data_dir) if collect or zone else []
+    if collect_drives:
         offers, collect_had_failure, cache_report = collect_offers_with_cache(
             items,
-            [drive.strip() for drive in collect.split(",") if drive.strip()],
+            collect_drives,
             profile=profile,
             browser_command=browser_command,
             max_results=max_results,
@@ -4275,6 +4564,14 @@ def week(
         typer.Option("--collect", help="Drives à collecter, ex: leclerc,auchan"),
     ] = None,
     collect_output: Annotated[Path | None, typer.Option("--collect-output")] = None,
+    zone: Annotated[
+        str | None,
+        typer.Option("--zone", help="Code postal ou ville : collecte les drives actifs du rayon"),
+    ] = None,
+    radius: Annotated[
+        float,
+        typer.Option("--radius", min=0.5, max=MAX_RADIUS_KM, help="Rayon de la zone en km"),
+    ] = DEFAULT_RADIUS_KM,
     profile: Annotated[str, typer.Option("--profile", help="Profil Managed Browser")] = "courses",
     browser_command: Annotated[str | None, typer.Option("--browser-command")] = None,
     max_results: Annotated[int, typer.Option("--max-results", min=1)] = 5,
@@ -4493,10 +4790,13 @@ def week(
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
     cache_report: dict[str, dict] = {}
-    if collect:
+    collect_drives = (
+        _resolve_collect_drives(collect, zone, radius, data_dir) if collect or zone else []
+    )
+    if collect_drives:
         offers, collect_had_failure, cache_report = collect_offers_with_cache(
             items,
-            [drive.strip() for drive in collect.split(",") if drive.strip()],
+            collect_drives,
             profile=profile,
             browser_command=browser_command,
             max_results=max_results,
