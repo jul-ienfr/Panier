@@ -12,6 +12,7 @@ from typing import Annotated, Any
 
 import typer
 import yaml
+from pydantic import BaseModel
 
 from panier import __version__
 from panier.brands import (
@@ -783,12 +784,11 @@ def cart_flow_value(result: BrowserCommandResult) -> dict:
 def _cart_result_counts(value: dict, action: str) -> dict[str, int]:
     raw_catalog = value.get("catalog_found")
     catalog_found: list = list(raw_catalog) if isinstance(raw_catalog, list) else []
-    if action == "remove":
-        available = value.get("removable") if isinstance(value.get("removable"), list) else []
-        done = value.get("removed") if isinstance(value.get("removed"), list) else []
-    else:
-        available = value.get("addable") if isinstance(value.get("addable"), list) else []
-        done = value.get("inserted") if isinstance(value.get("inserted"), list) else []
+    available_key, done_key = ("removable", "removed") if action == "remove" else ("addable", "inserted")
+    raw_available = value.get(available_key)
+    raw_done = value.get(done_key)
+    available: list = list(raw_available) if isinstance(raw_available, list) else []
+    done: list = list(raw_done) if isinstance(raw_done, list) else []
     return {"catalog_found": len(catalog_found), "available": len(available), "done": len(done)}
 
 
@@ -797,19 +797,20 @@ def echo_cart_flow_result(
 ) -> None:
     value = cart_flow_value(result)
     suffix = "dry-run" if dry_run else "live"
-    catalog_found: list = (
-        list(value.get("catalog_found")) if isinstance(value.get("catalog_found"), list) else []
-    )
+    raw_catalog = value.get("catalog_found")
+    catalog_found: list = list(raw_catalog) if isinstance(raw_catalog, list) else []
     if action == "remove":
-        available = value.get("removable") if isinstance(value.get("removable"), list) else []
-        done = value.get("removed") if isinstance(value.get("removed"), list) else []
         available_label = "Produits retirables/disponibles"
         done_label = "Produits effectivement retirés"
+        available_key, done_key = "removable", "removed"
     else:
-        available = value.get("addable") if isinstance(value.get("addable"), list) else []
-        done = value.get("inserted") if isinstance(value.get("inserted"), list) else []
         available_label = "Produits ajoutables/disponibles"
         done_label = "Produits effectivement insérés"
+        available_key, done_key = "addable", "inserted"
+    raw_available = value.get(available_key)
+    raw_done = value.get(done_key)
+    available: list = list(raw_available) if isinstance(raw_available, list) else []
+    done: list = list(raw_done) if isinstance(raw_done, list) else []
     typer.echo(f"Flow panier {store} exécuté ({suffix}).")
     typer.echo(f"  Produits trouvés/catalogue: {len(catalog_found)}")
     typer.echo(f"  {available_label}: {len(available)}")
@@ -817,7 +818,8 @@ def echo_cart_flow_result(
     message = value.get("message")
     if message:
         typer.echo(f"  Note: {message}")
-    line_results = value.get("line_results") if isinstance(value.get("line_results"), list) else []
+    raw_line_results = value.get("line_results")
+    line_results: list = list(raw_line_results) if isinstance(raw_line_results, list) else []
     blocked = [
         entry for entry in line_results if isinstance(entry, dict) and entry.get("blocked_by")
     ]
@@ -916,7 +918,8 @@ def run_cart_status_for_store(
 
 
 def _echo_cart_status(store: str, status: dict) -> None:
-    counts = status.get("counts") if isinstance(status.get("counts"), dict) else {}
+    raw_counts = status.get("counts")
+    counts: dict = raw_counts if isinstance(raw_counts, dict) else {}
     typer.echo(f"État panier {store} (read-only).")
     typer.echo(f"  URL: {status.get('url', '')}")
     typer.echo(f"  Attendus: {counts.get('expected', 0)}")
@@ -2094,7 +2097,7 @@ def init_project(
             ],
         )
     ]
-    targets: list[tuple[Path, object]] = [
+    targets: list[tuple[Path, BaseModel | list[dict[str, Any]]]] = [
         (profile, FoodProfile()),
         (recipes, [recipe.model_dump(mode="json") for recipe in starter_recipes]),
         (pantry, Pantry()),
@@ -4250,7 +4253,9 @@ def plan(
     offers: list[StoreOffer] | None = None
     collect_had_failure = False
     cache_report: dict[str, dict] = {}
-    collect_drives = _resolve_collect_drives(collect, zone, radius, data_dir) if collect or zone else []
+    collect_drives = (
+        _resolve_collect_drives(collect, zone, radius, data_dir) if collect or zone else []
+    )
     if collect_drives:
         offers, collect_had_failure, cache_report = collect_offers_with_cache(
             items,
@@ -4644,6 +4649,10 @@ def cart_sync(
         return
 
 
+def _json_optional_float(value: float | None) -> float | None:
+    return float(value) if value is not None else None
+
+
 @app.command("week")
 def week(
     meals: Annotated[int, typer.Option("--meals", min=1)] = 7,
@@ -4829,9 +4838,7 @@ def week(
         _week_costs = {
             key: {
                 "total": float(cost.total) if cost.total is not None else None,
-                "per_servings": float(cost.per_servings())
-                if cost.per_servings() is not None
-                else None,
+                "per_servings": _json_optional_float(cost.per_servings()),
                 "partial_total": float(cost.partial_total),
                 "unpriced": cost.unpriced,
                 "costs": [
@@ -4842,16 +4849,18 @@ def week(
             for key, cost in costs_by_name.items()
         }
     elif len(priced_totals) == len(costs_by_name) and costs_by_name:
-        total_cost = sum(
-            float(costs_by_name[key].total) * count for key, count in week_plan.counts.items()
-        )
+        total_cost = 0.0
+        for key, count in week_plan.counts.items():
+            value = costs_by_name[key].total
+            if value is not None:
+                total_cost += value * count
         typer.echo(f"Coût hebdo estimé ({repeat_sum} cuissons): {total_cost:.2f} €")
     elif priced_totals:
-        partial = sum(
-            float(costs_by_name[key].total) * count
-            for key, count in week_plan.counts.items()
-            if costs_by_name[key].total is not None
-        )
+        partial = 0.0
+        for key, count in week_plan.counts.items():
+            value = costs_by_name[key].total
+            if value is not None:
+                partial += value * count
         unpriced = sorted(key for key, cost in costs_by_name.items() if cost.total is None)
         typer.echo(
             f"Coût hebdo partiel: {partial:.2f} € (coût inconnu pour: {', '.join(unpriced)})"
@@ -5188,7 +5197,7 @@ def _lan_addresses(port: int) -> list[str]:
         for hostname in hostnames:
             for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
                 ip = info[4][0]
-                if not ip.startswith("127.") and ip not in addresses:
+                if isinstance(ip, str) and not ip.startswith("127.") and ip not in addresses:
                     addresses.append(ip)
     except OSError:
         pass
