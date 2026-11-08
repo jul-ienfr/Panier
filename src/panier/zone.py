@@ -224,17 +224,18 @@ def geocode(query: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
     postal = postal_codes[0] if isinstance(postal_codes, list) and postal_codes else None
     if postal is None and _looks_like_postal_code(cleaned):
         postal = cleaned
+    resolved_city: str | None
     if len(points) == 1:
         label = f"{points[0][2]} ({postal})" if postal else points[0][2]
-        city = points[0][2]
+        resolved_city = points[0][2]
     else:
         label = f"{postal} — {len(points)} communes"
-        city = None
+        resolved_city = None
     return GeoPoint(
         label=label,
         latitude=latitude,
         longitude=longitude,
-        city=city,
+        city=resolved_city,
         postal_code=str(postal) if postal else None,
         insee=str(first.get("code")) if first.get("code") else None,
     )
@@ -366,9 +367,7 @@ def discover_drives(
         folded_name = fold_name(name)
         # « E.Leclerc espace culturel » partage l'enseigne mais n'est pas un
         # drive : le marquer collectable ferait échouer la collecte panier.
-        is_drive = store is not None and not any(
-            hint in folded_name for hint in _NON_DRIVE_HINTS
-        )
+        is_drive = store is not None and not any(hint in folded_name for hint in _NON_DRIVE_HINTS)
         key = (normalize_name(name), int(round(latitude * 1000)), int(round(longitude * 1000)))
         if key in seen:
             continue

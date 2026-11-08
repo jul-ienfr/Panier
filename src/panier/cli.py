@@ -63,6 +63,7 @@ from panier.drive import (
     collect_drive_offers,
     open_drive_searches,
 )
+from panier.drive_basket import DriveBasketError, compare_from_history, parse_items
 from panier.history_store import (
     history_db_path,
     history_stats,
@@ -3183,8 +3184,7 @@ def drive_zone_command(
         typer.echo("Aucun foyer actif : la sélection n'est pas persistée.")
     else:
         typer.echo(
-            "Activer/désactiver : panier drive zone <zone> --enable <enseigne> "
-            "--disable <enseigne>"
+            "Activer/désactiver : panier drive zone <zone> --enable <enseigne> --disable <enseigne>"
         )
 
 
@@ -3311,6 +3311,97 @@ def drive_pick(
             f"{format_offer_price(chosen.offer, item, comparison)} "
             f"(score {chosen.score:.2f}; {chosen.reason})"
         )
+
+
+@drive_app.command("basket")
+def drive_basket(
+    item: Annotated[
+        list[str] | None,
+        typer.Option("--item", help="Article à comparer (répétable ou CSV)"),
+    ] = None,
+    items_text: Annotated[
+        str, typer.Option("--items", help="Articles séparés par des virgules")
+    ] = "",
+    store: Annotated[
+        list[str] | None,
+        typer.Option("--store", help="Enseigne à comparer (répétable) ; vide = foyer actif"),
+    ] = None,
+    since: Annotated[
+        str, typer.Option("--since", help="Fenêtre d'historique ex. 7d, 30d, 90d")
+    ] = "90d",
+    mode: Annotated[PriceMode, typer.Option("--mode")] = PriceMode.HYBRID,
+    max_stores: Annotated[int, typer.Option("--max-stores", min=1, max=6)] = 2,
+    compare_by: Annotated[str, typer.Option("--compare-by")] = "price",
+    include_disabled: Annotated[
+        bool,
+        typer.Option("--include-disabled", help="Comparer aussi les enseignes désactivées"),
+    ] = False,
+    data_dir: Annotated[Path, typer.Option("--data-dir")] = DEFAULT_DATA_DIR,
+    output_format: OutputFormat = "text",
+) -> None:
+    """Compare un panier sur les drives retenus, à partir des prix collectés."""
+    try:
+        shopping = parse_items(item, extra=items_text)
+        payload = compare_from_history(
+            data_dir,
+            shopping,
+            stores=store,
+            since=since,
+            mode=mode,
+            max_stores=max_stores,
+            compare_by=compare_by,
+            include_disabled=include_disabled,
+        )
+    except DriveBasketError as exc:
+        typer.echo(f"Panier drive indisponible: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if normalize_output_format(output_format) == "json":
+        echo_json(payload)
+        return
+
+    def eur(value: float) -> str:
+        return f"{value:.2f} €"
+
+    typer.echo(f"Panier drive — {len(payload['items'])} article(s), fenêtre {since}")
+    typer.echo("")
+    for entry in payload["stores"]:
+        state = (
+            "active"
+            if entry["enabled"] is True
+            else "désactivée"
+            if entry["enabled"] is False
+            else "non choisie"
+        )
+        coverage_text = f"{entry['items_covered']}/{entry['items_total']} articles"
+        typer.echo(
+            f"- {entry['store']:12} [{state}] {coverage_text} · "
+            f"{entry['offers_count']} offres · dernier relevé {entry['last_collected_at'] or '—'}"
+        )
+        if entry["items_missing"]:
+            typer.echo(f"    manquants: {', '.join(entry['items_missing'])}")
+    typer.echo("")
+    for option in payload["options"]:
+        stores = " + ".join(option["stores"])
+        if option["complete"] and option["total"] is not None:
+            typer.echo(f"{stores}: {eur(option['total'])}")
+        else:
+            missing = ", ".join(option["missing_items"]) or "—"
+            typer.echo(f"{stores}: incomplet (manquants: {missing})")
+    recommendation = payload["recommendation"]
+    typer.echo("")
+    if recommendation is not None:
+        stores = " + ".join(recommendation["stores"])
+        typer.echo(f"Recommandation: {stores} — {eur(recommendation['total'])}")
+        typer.echo(recommendation["reason"])
+        for line in recommendation["by_item"]:
+            typer.echo(
+                f"  - {line['item']}: {line['product']} — {line['store']} — {eur(line['price'])}"
+            )
+    else:
+        typer.echo(f"Pas de recommandation: {payload['error']}")
+    if payload["missing_items"]:
+        typer.echo("")
+        typer.echo("Articles sans aucune offre: " + ", ".join(payload["missing_items"]))
 
 
 def _drives_for_zone(data_dir: Path, query: str, radius_km: float) -> list[str]:

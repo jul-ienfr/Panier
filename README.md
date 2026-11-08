@@ -55,6 +55,8 @@ panier drive plan examples/shopping-list.yaml --drive leclerc
 panier drive open examples/shopping-list.yaml --drive leclerc --profile courses
 panier drive collect examples/shopping-list.yaml --drive auchan --output offers.yaml
 panier drive pick examples/shopping-list.yaml examples/prices.yaml
+panier drive zone 83440 --radius 20 --format json   # drives géolocalisés autour d'une zone
+panier drive basket --items riz,thon,courgettes --since 90d --max-stores 2
 panier compare examples/emmental-rape.yaml --prices examples/prices-emmental-rape-leclerc-auchan.yaml --compare-by unit-price --max-stores 2
 mkdir -p ~/.panier
 cp examples/recipes.yaml ~/.panier/recipes.yaml
@@ -85,11 +87,22 @@ panier drive plan examples/shopping-list.yaml --drive leclerc   # requêtes à l
 panier drive pick examples/shopping-list.yaml examples/prices.yaml
 ```
 
-`drive plan` prépare des termes de recherche stables, avec règles de marque distributeur.
 `drive open` ouvre ces recherches via le Managed Browser local au lieu de scraper directement le site :
 
 ```bash
 panier drive open examples/shopping-list.yaml --drive leclerc --profile panier
+```
+
+`drive zone` résout un code postal ou une ville via l'API géo publique, interroge
+Overpass pour les drives du rayon, puis présélectionne les enseignes collectables
+les plus proches (`--enable/--disable` pour ajuster). `drive basket` compare
+ensuite une liste de courses **sur les prix déjà collectés** de l'historique
+local, restreint aux enseignes actives du foyer : il renvoie la couverture de
+chaque drive et la meilleure combinaison. Aucun réseau pour cette étape.
+
+```bash
+panier drive zone 83440 --radius 20 --format json
+panier drive basket --items riz,thon,courgettes --since 90d --max-stores 2 --format json
 ```
 
 Par défaut, Panier passe par le shim `panier-managed-browser` qui traduit le contrat CLI historique vers le **daemon Managed Browser v2** (HTTP, `http://127.0.0.1:9377` par défaut) :

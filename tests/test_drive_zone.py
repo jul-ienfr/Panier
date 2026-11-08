@@ -412,9 +412,7 @@ def test_zone_drives_falls_back_to_suggestions(monkeypatch, tmp_path: Path) -> N
     assert cli._drives_for_zone(tmp_path, "83440", 20) == ["carrefour", "leclerc"]
 
 
-def test_zone_drives_ignores_enabled_store_outside_radius(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_zone_drives_ignores_enabled_store_outside_radius(monkeypatch, tmp_path: Path) -> None:
     _household(tmp_path, {"auchan": True})
     monkeypatch.setattr(cli, "drive_zone", lambda *a, **k: _zone_with_candidates())
     assert cli._drives_for_zone(tmp_path, "83440", 20) == ["carrefour", "leclerc"]
