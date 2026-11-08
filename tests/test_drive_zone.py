@@ -74,6 +74,26 @@ def test_geocode_city_names_the_single_commune(monkeypatch) -> None:
     assert point.city == "Montauroux"
 
 
+def test_geocode_city_picks_most_populated_homonym(monkeypatch) -> None:
+    small = {**_commune("Saint-Raphaël", 45.37, 2.02, "24160", "24493"), "population": 94}
+    big = {**_commune("Saint-Raphaël", 43.42, 6.77, "83700", "83118"), "population": 37113}
+    monkeypatch.setattr(zone, "_get_json", lambda *a, **k: [small, big])
+    point = geocode("saint-raphael")
+    assert point.insee == "83118"
+    assert point.latitude == pytest.approx(43.42)
+    assert point.city == "Saint-Raphaël"
+
+
+def test_geocode_city_prefers_exact_name_over_larger_prefix(monkeypatch) -> None:
+    prefix = {
+        **_commune("Saint-Raphaël Bellevue", 43.40, 6.70, "83700", "83999"),
+        "population": 90000,
+    }
+    exact = {**_commune("Saint-Raphaël", 43.42, 6.77, "83700", "83118"), "population": 120}
+    monkeypatch.setattr(zone, "_get_json", lambda *a, **k: [prefix, exact])
+    assert geocode("Saint-Raphaël").insee == "83118"
+
+
 def test_geocode_rejects_empty_query() -> None:
     with pytest.raises(ZoneError):
         geocode("   ")
@@ -184,7 +204,7 @@ def test_geo_api_env_override_is_used(monkeypatch) -> None:
     monkeypatch.setattr(zone, "_get_json", fake)
     geocode("83440", environ={zone.GEO_API_ENV_VAR: "http://localhost:9/"})
     assert urls == [
-        "http://localhost:9/communes?codePostal=83440&fields=nom,centre,code,codesPostaux"
+        "http://localhost:9/communes?codePostal=83440&fields=nom,centre,code,codesPostaux,population"
     ]
 
 

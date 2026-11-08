@@ -183,6 +183,24 @@ def _looks_like_postal_code(query: str) -> bool:
     return len(query) == 5 and query.isdigit()
 
 
+def _population(record: dict[str, Any]) -> int:
+    value = record.get("population")
+    return value if isinstance(value, int) else 0
+
+
+def _best_named_commune(records: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Retient la commune la plus peuplée parmi les homonymes d'un nom saisi.
+
+    « Saint-Raphaël » existe en 24160 (94 hab.) et en 83700 (37 113 hab.) :
+    prendre la première réponse de l'API plaçait la recherche en Dordogne.
+    Le nom exact est prioritaire, la population tranche les égalités.
+    """
+    wanted = fold_name(query)
+    exact = [r for r in records if fold_name(str(r.get("nom") or "")) == wanted]
+    candidates = exact or records
+    return [max(candidates, key=_population)]
+
+
 def geocode(query: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
     """Transforme un code postal ou un nom de ville en point géographique.
 
@@ -190,33 +208,41 @@ def geocode(query: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
     Montauroux…). Dans ce cas le point retenu est le barycentre du groupe et le
     libellé reste le code postal : nommer « Callian » une recherche 83440
     suggérerait une précision qui n'existe pas.
+
+    Un nom de ville peut désigner plusieurs communes homonymes : la plus
+    peuplée est retenue, pour ne pas géolocaliser « Saint-Raphaël » en Dordogne.
     """
     cleaned = " ".join(query.split())
     if not cleaned:
         raise ZoneError("zone vide (code postal ou ville attendu)")
     base = _endpoint(environ, GEO_API_ENV_VAR, DEFAULT_GEO_API_URL)
-    fields = "nom,centre,code,codesPostaux"
+    fields = "nom,centre,code,codesPostaux,population"
     if _looks_like_postal_code(cleaned):
         url = f"{base}/communes?codePostal={urllib.parse.quote(cleaned)}&fields={fields}"
     else:
-        url = f"{base}/communes?nom={urllib.parse.quote(cleaned)}&fields={fields}&limit=1"
+        url = f"{base}/communes?nom={urllib.parse.quote(cleaned)}&fields={fields}&limit=10"
     payload = _get_json(url, environ=environ)
     if not isinstance(payload, list) or not payload:
         raise ZoneError(f"zone introuvable : {cleaned}")
+    records = [
+        record
+        for record in payload
+        if isinstance(record, dict)
+        and isinstance(record.get("centre"), dict)
+        and isinstance(record["centre"].get("coordinates"), list)
+        and len(record["centre"]["coordinates"]) == 2
+    ]
+    if not records:
+        raise ZoneError(f"zone sans coordonnées exploitables : {cleaned}")
+    if not _looks_like_postal_code(cleaned):
+        records = _best_named_commune(records, cleaned)
     points: list[tuple[float, float, str, dict[str, Any]]] = []
-    for record in payload:
-        if not isinstance(record, dict):
-            continue
-        centre = record.get("centre")
-        coordinates = centre.get("coordinates") if isinstance(centre, dict) else None
-        if not isinstance(coordinates, list) or len(coordinates) != 2:
-            continue
+    for record in records:
+        coordinates = record["centre"]["coordinates"]
         latitude = float(coordinates[1])
         longitude = float(coordinates[0])
         city = str(record.get("nom") or "")
         points.append((latitude, longitude, city, record))
-    if not points:
-        raise ZoneError(f"zone sans coordonnées exploitables : {cleaned}")
     latitude = sum(point[0] for point in points) / len(points)
     longitude = sum(point[1] for point in points) / len(points)
     first = points[0][3]
