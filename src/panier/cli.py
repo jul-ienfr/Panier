@@ -143,6 +143,7 @@ from panier.substitutions import (
 from panier.zone import (
     DEFAULT_RADIUS_KM,
     MAX_RADIUS_KM,
+    ZONE_CACHE_SUBDIR,
     DriveCandidate,
     ZoneError,
     drive_zone,
@@ -784,7 +785,9 @@ def cart_flow_value(result: BrowserCommandResult) -> dict:
 def _cart_result_counts(value: dict, action: str) -> dict[str, int]:
     raw_catalog = value.get("catalog_found")
     catalog_found: list = list(raw_catalog) if isinstance(raw_catalog, list) else []
-    available_key, done_key = ("removable", "removed") if action == "remove" else ("addable", "inserted")
+    available_key, done_key = (
+        ("removable", "removed") if action == "remove" else ("addable", "inserted")
+    )
     raw_available = value.get(available_key)
     raw_done = value.get(done_key)
     available: list = list(raw_available) if isinstance(raw_available, list) else []
@@ -3157,7 +3160,9 @@ def drive_zone_command(
         disable=disable,
     )
     try:
-        zone = drive_zone(query, radius_km=radius, household=household)
+        zone = drive_zone(
+            query, radius_km=radius, household=household, cache_dir=data_dir / ZONE_CACHE_SUBDIR
+        )
     except ZoneError as exc:
         typer.echo(f"Zone indisponible: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -3416,7 +3421,9 @@ def _drives_for_zone(data_dir: Path, query: str, radius_km: float) -> list[str]:
     collectables les plus proches).
     """
     household = load_active_household(data_dir)
-    zone_result = drive_zone(query, radius_km=radius_km, household=household)
+    zone_result = drive_zone(
+        query, radius_km=radius_km, household=household, cache_dir=data_dir / ZONE_CACHE_SUBDIR
+    )
     if household is not None:
         enabled = household.enabled_stores()
         if enabled:

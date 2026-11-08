@@ -13,12 +13,15 @@ le foyer décide.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from panier.drive import canonical_drive_name
@@ -41,6 +44,9 @@ MAX_RADIUS_KM = 100.0
 DEFAULT_TIMEOUT_S = 30.0
 OVERPASS_TIMEOUT_S = 60.0
 USER_AGENT = "panier-cli/0.1 (drive discovery)"
+ZONE_CACHE_SUBDIR = Path("cache") / "zone"
+ZONE_CACHE_TTL_HOURS = 168.0
+ZONE_CACHE_TTL_ENV_VAR = "PANIER_ZONE_CACHE_TTL_HOURS"
 
 COLLECTABLE_STORES = ("auchan", "carrefour", "intermarche", "leclerc", "superu")
 
@@ -201,7 +207,78 @@ def _best_named_commune(records: list[dict[str, Any]], query: str) -> list[dict[
     return [max(candidates, key=_population)]
 
 
-def geocode(query: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
+def _cache_ttl_hours(environ: dict[str, str] | None) -> float:
+    """TTL du cache zone : variable d'environnement au-dessus du défaut."""
+    values = os.environ if environ is None else environ
+    raw = values.get(ZONE_CACHE_TTL_ENV_VAR, "").strip()
+    if raw:
+        try:
+            parsed = float(raw.replace(",", "."))
+        except ValueError:
+            return ZONE_CACHE_TTL_HOURS
+        if parsed > 0:
+            return parsed
+    return ZONE_CACHE_TTL_HOURS
+
+
+def _cache_path(cache_dir: Path | None, key: str) -> Path | None:
+    if cache_dir is None:
+        return None
+    return cache_dir / f"{key}.json"
+
+
+def _read_cache(path: Path | None, *, ttl_hours: float) -> tuple[dict[str, Any] | None, bool]:
+    """Charge une entrée : ``(données, fraîches)``.
+
+    Une entrée absente, illisible ou corrompue vaut ``(None, False)`` : le cache
+    ne peut jamais être la cause d'un échec, il ne sert qu'à accélérer.
+    """
+    if path is None:
+        return None, False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        collected_at = payload["collected_at"]
+        data = payload["data"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, False
+    if not isinstance(data, dict) or not isinstance(collected_at, (int, float)):
+        return None, False
+    age_hours = max(0.0, (time.time() - float(collected_at)) / 3600.0)
+    return data, age_hours <= ttl_hours
+
+
+def _write_cache(path: Path | None, data: dict[str, Any]) -> None:
+    """Persiste une entrée en best-effort : un disque en erreur ne casse rien."""
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+        tmp.write_text(
+            json.dumps({"collected_at": time.time(), "data": data}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+def _candidates_from_cache(data: dict[str, Any]) -> list[DriveCandidate] | None:
+    items = data.get("candidates")
+    if not isinstance(items, list):
+        return None
+    try:
+        return [DriveCandidate(**item) for item in items if isinstance(item, dict)]
+    except TypeError:
+        return None
+
+
+def geocode(
+    query: str,
+    *,
+    environ: dict[str, str] | None = None,
+    cache_dir: Path | None = None,
+) -> GeoPoint:
     """Transforme un code postal ou un nom de ville en point géographique.
 
     Un code postal couvre souvent plusieurs communes (83440 → Callian, Fayence,
@@ -215,6 +292,19 @@ def geocode(query: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
     cleaned = " ".join(query.split())
     if not cleaned:
         raise ZoneError("zone vide (code postal ou ville attendu)")
+    path = _cache_path(cache_dir, f"geo-{hashlib.sha1(cleaned.encode('utf-8')).hexdigest()[:16]}")
+    data, fresh = _read_cache(path, ttl_hours=_cache_ttl_hours(environ))
+    if data is not None and fresh:
+        try:
+            return GeoPoint(**data)
+        except TypeError:
+            pass
+    point = _geocode_remote(cleaned, environ=environ)
+    _write_cache(path, point.as_dict())
+    return point
+
+
+def _geocode_remote(cleaned: str, *, environ: dict[str, str] | None = None) -> GeoPoint:
     base = _endpoint(environ, GEO_API_ENV_VAR, DEFAULT_GEO_API_URL)
     fields = "nom,centre,code,codesPostaux,population"
     if _looks_like_postal_code(cleaned):
@@ -353,10 +443,46 @@ def discover_drives(
     *,
     radius_km: float = DEFAULT_RADIUS_KM,
     environ: dict[str, str] | None = None,
+    cache_dir: Path | None = None,
 ) -> list[DriveCandidate]:
-    """Liste les magasins autour d'un point, triés par distance."""
+    """Liste les magasins autour d'une zone, triés par distance.
+
+    La découverte est la seule étape lente (Overpass : 25-120 s, 502
+    fréquents). Elle est donc cacheable : une zone déjà explorée est relue
+    sans appel réseau, et un échec OpenStreetMap retombe sur la dernière
+    découverte connue. La sélection du foyer n'est pas dans ce cache — elle
+    est réappliquée à chaque appel par ``drive_zone``, pour qu'une bascule
+    soit visible immédiatement.
+    """
     if radius_km <= 0 or radius_km > MAX_RADIUS_KM:
         raise ZoneError(f"rayon invalide : {radius_km} km (attendu 0 < rayon <= {MAX_RADIUS_KM})")
+    path = _cache_path(
+        cache_dir,
+        f"osm-{location.latitude:.3f}-{location.longitude:.3f}-{radius_km:g}",
+    )
+    ttl_hours = _cache_ttl_hours(environ)
+    data, fresh = _read_cache(path, ttl_hours=ttl_hours)
+    if data is not None and fresh:
+        cached = _candidates_from_cache(data)
+        if cached is not None:
+            return cached
+    try:
+        candidates = _discover_drives_remote(location, radius_km=radius_km, environ=environ)
+    except ZoneError:
+        stale = _candidates_from_cache(data) if data is not None else None
+        if stale is not None:
+            return stale
+        raise
+    _write_cache(path, {"candidates": [asdict(candidate) for candidate in candidates]})
+    return candidates
+
+
+def _discover_drives_remote(
+    location: GeoPoint,
+    *,
+    radius_km: float = DEFAULT_RADIUS_KM,
+    environ: dict[str, str] | None = None,
+) -> list[DriveCandidate]:
     query = _overpass_query(location.latitude, location.longitude, radius_km)
     body = urllib.parse.urlencode({"data": query}).encode("utf-8")
     payload: Any = None
@@ -451,10 +577,13 @@ def drive_zone(
     radius_km: float = DEFAULT_RADIUS_KM,
     household: HouseholdProfile | None = None,
     environ: dict[str, str] | None = None,
+    cache_dir: Path | None = None,
 ) -> DriveZone:
-    location = geocode(query, environ=environ)
+    location = geocode(query, environ=environ, cache_dir=cache_dir)
     enabled, disabled = selection_state(household)
-    discovered = discover_drives(location, radius_km=radius_km, environ=environ)
+    discovered = discover_drives(
+        location, radius_km=radius_km, environ=environ, cache_dir=cache_dir
+    )
     suggested = default_selection(discovered, disabled=disabled)
     candidates = [
         replace(candidate, suggested=candidate.store in suggested)

@@ -525,3 +525,161 @@ def test_cli_select_accepts_comma_list(monkeypatch, tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["enabled_stores"] == ["carrefour", "leclerc"]
     assert payload["disabled_stores"] == ["auchan"]
+
+
+def _communes_payload() -> list[dict]:
+    return [
+        _commune("Callian", 43.62, 6.75, "83440", "83029"),
+        _commune("Montauroux", 43.59, 6.80, "83440", "83081"),
+    ]
+
+
+def _osm_payload() -> dict:
+    return {
+        "elements": [
+            _element("E.Leclerc", 43.60, 6.80, "E.Leclerc"),
+            _element("Carrefour Market", 43.62, 6.82, "Carrefour Market"),
+        ]
+    }
+
+
+def _route_geocode_then_osm(calls: list[int]):
+    def fake(*args, **kwargs):
+        calls.append(1)
+        url = args[0] if args else kwargs.get("url", "")
+        if "communes" in url:
+            return _communes_payload()
+        return _osm_payload()
+
+    return fake
+
+
+def test_geocode_caches_result_on_disk(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache" / "zone"
+    calls: list[int] = []
+
+    def fake(*args, **kwargs):
+        calls.append(1)
+        return _communes_payload()
+
+    monkeypatch.setattr(zone, "_get_json", fake)
+    first = geocode("83440", cache_dir=cache_dir)
+    second = geocode("83440", cache_dir=cache_dir)
+    assert second == first
+    assert len(calls) == 1
+
+
+def test_discover_drives_reads_fresh_cache_without_network(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache" / "zone"
+    location = GeoPoint(label="83440", latitude=43.605, longitude=6.775)
+    calls: list[int] = []
+
+    def fake(*args, **kwargs):
+        calls.append(1)
+        return _osm_payload()
+
+    monkeypatch.setattr(zone, "_get_json", fake)
+    first = discover_drives(location, radius_km=20, cache_dir=cache_dir)
+    assert [candidate.store for candidate in first] == ["leclerc", "carrefour"]
+    assert len(calls) == 1
+
+    def broken(*args, **kwargs):
+        raise ZoneError("miroir indisponible")
+
+    monkeypatch.setattr(zone, "_get_json", broken)
+    second = discover_drives(location, radius_km=20, cache_dir=cache_dir)
+    assert [candidate.store for candidate in second] == ["leclerc", "carrefour"]
+    assert len(calls) == 1
+
+
+def test_discover_drives_falls_back_to_stale_cache(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache" / "zone"
+    location = GeoPoint(label="83440", latitude=43.605, longitude=6.775)
+    monkeypatch.setattr(zone, "_get_json", lambda *a, **k: _osm_payload())
+    discover_drives(location, radius_km=20, cache_dir=cache_dir)
+    entry = cache_dir / "osm-43.605-6.775-20.json"
+    cached = json.loads(entry.read_text(encoding="utf-8"))
+    cached["collected_at"] = 0.0
+    entry.write_text(json.dumps(cached), encoding="utf-8")
+
+    def broken(*args, **kwargs):
+        raise ZoneError("miroir indisponible")
+
+    monkeypatch.setattr(zone, "_get_json", broken)
+    candidates = discover_drives(location, radius_km=20, cache_dir=cache_dir)
+    assert [candidate.store for candidate in candidates] == ["leclerc", "carrefour"]
+
+
+def test_discover_drives_raises_without_cache_when_remote_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    def broken(*args, **kwargs):
+        raise ZoneError("miroir indisponible")
+
+    monkeypatch.setattr(zone, "_get_json", broken)
+    location = GeoPoint(label="83440", latitude=43.605, longitude=6.775)
+    with pytest.raises(ZoneError):
+        discover_drives(location, radius_km=20, cache_dir=tmp_path / "cache" / "zone")
+
+
+def test_drive_zone_reapplies_household_on_cached_discovery(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache" / "zone"
+    calls: list[int] = []
+    monkeypatch.setattr(zone, "_get_json", _route_geocode_then_osm(calls))
+    household = _household(tmp_path, {"leclerc": True})
+    first = drive_zone("83440", radius_km=20, household=household, cache_dir=cache_dir)
+    assert first.enabled_stores == ("leclerc",)
+    assert {c.store for c in first.candidates if c.selected} == {"leclerc"}
+    assert len(calls) == 2
+
+    def broken(*args, **kwargs):
+        raise ZoneError("miroir indisponible")
+
+    monkeypatch.setattr(zone, "_get_json", broken)
+    updated = toggle_store(household, "leclerc", enabled=False)
+    updated = toggle_store(updated, "carrefour", enabled=True)
+    second = drive_zone("83440", radius_km=20, household=updated, cache_dir=cache_dir)
+    assert second.enabled_stores == ("carrefour",)
+    assert {c.store for c in second.candidates if c.selected} == {"carrefour"}
+    assert len(calls) == 2
+
+
+def test_zone_cache_ignores_corrupted_entries(monkeypatch, tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache" / "zone"
+    monkeypatch.setattr(zone, "_get_json", lambda *a, **k: _communes_payload())
+    geocode("83440", cache_dir=cache_dir)
+    for entry in cache_dir.glob("geo-*.json"):
+        entry.write_text("{cache corrompu", encoding="utf-8")
+
+    def broken(*args, **kwargs):
+        raise ZoneError("miroir indisponible")
+
+    monkeypatch.setattr(zone, "_get_json", broken)
+    with pytest.raises(ZoneError):
+        geocode("83440", cache_dir=cache_dir)
+
+
+def test_cli_zone_populates_data_dir_cache(monkeypatch, tmp_path: Path) -> None:
+    _household(tmp_path, {})
+    calls: list[int] = []
+    monkeypatch.setattr(zone, "_get_json", _route_geocode_then_osm(calls))
+    args = [
+        "drive",
+        "zone",
+        "83440",
+        "--radius",
+        "20",
+        "--data-dir",
+        str(tmp_path),
+        "--format",
+        "json",
+    ]
+    result = RUNNER.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert len(payload["candidates"]) == 2
+    assert payload["suggested_stores"] == ["carrefour", "leclerc"]
+    assert len(calls) == 2
+    result2 = RUNNER.invoke(app, args)
+    assert result2.exit_code == 0, result2.output
+    assert len(calls) == 2
